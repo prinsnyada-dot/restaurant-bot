@@ -26,12 +26,12 @@ MIN_HOURS_BETWEEN_RESERVATIONS = 3  # Минимальный интервал м
 # Создаем объекты бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
+python main.py
 # Планировщик для утренних отчетов
 scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))
 
 # ========== БАЗА ДАННЫХ ==========
-reservations_db = []
+from database import db
 users_db = {}
 current_year = CURRENT_YEAR
 pending_reservations = {}  # Временное хранение броней, ожидающих подтверждения
@@ -454,54 +454,46 @@ def format_reservation_for_display(res: dict) -> str:
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ==========
 
 def add_reservation(data):
-    """Добавление брони"""
-    global reservations_db
-    reservation_id = len(reservations_db) + 1
-    data['id'] = reservation_id
-    data['created_at'] = datetime.now().isoformat()
-    reservations_db.append(data)
+    """Добавление брони в базу данных"""
+    # Убираем авто-нумерацию, база сделает сама
+    if 'id' in data:
+        del data['id']
+    
+    reservation_id = db.add_reservation(data)
     return reservation_id
 
-def update_reservation(reservation_id: int, updated_data: dict):
-    """Обновление брони"""
-    global reservations_db
-    for i, res in enumerate(reservations_db):
-        if res.get('id') == reservation_id:
-            reservations_db[i].update(updated_data)
-            return True
-    return False
+def update_reservation(reservation_id, updated_data):
+    """Обновление брони в базе"""
+    # Получаем текущие данные
+    current = db.get_reservation_by_id(reservation_id)
+    if not current:
+        return False
+    
+    # Обновляем поля
+    current.update(updated_data)
+    
+    # Сохраняем в базу (убираем id из данных для сохранения)
+    save_data = current.copy()
+    if 'id' in save_data:
+        del save_data['id']
+    
+    return db.update_reservation(reservation_id, save_data)
 
-def delete_reservation(reservation_id: int):
-    """Удаление брони"""
-    global reservations_db
-    for i, res in enumerate(reservations_db):
-        if res.get('id') == reservation_id:
-            deleted = reservations_db.pop(i)
-            return deleted
-    return None
+def delete_reservation(reservation_id):
+    """Удаление брони из базы"""
+    return db.delete_reservation(reservation_id)
 
-def get_reservation_by_id(reservation_id: int):
-    """Получение брони по ID"""
-    for res in reservations_db:
-        if res.get('id') == reservation_id:
-            return res
-    return None
+def get_reservation_by_id(reservation_id):
+    """Получение брони из базы по ID"""
+    return db.get_reservation_by_id(reservation_id)
 
 def get_today_reservations():
-    """Получение броней на сегодня"""
-    today = datetime.now().strftime("%Y-%m-%d")
-    return [r for r in reservations_db if r.get('date') == today]
+    """Получение броней на сегодня из базы"""
+    return db.get_today_reservations()
 
 def search_reservations(search_term):
-    """Поиск броней"""
-    results = []
-    search_term_lower = search_term.lower()
-    for r in reservations_db:
-        if (search_term_lower in r.get('name', '').lower() or 
-            search_term in r.get('phone', '') or
-            search_term_lower in r.get('occasion', '').lower()):
-            results.append(r)
-    return results
+    """Поиск броней в базе"""
+    return db.search_reservations(search_term)
 
 # ========== ФУНКЦИИ ДЛЯ УПРАВЛЕНИЯ АДМИНИСТРАТОРАМИ ==========
 

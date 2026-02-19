@@ -1,145 +1,103 @@
 import sqlite3
-import datetime
-from typing import List, Tuple, Optional
+import json
+from datetime import datetime
 
 class Database:
-    """Класс для работы с базой данных"""
-    
     def __init__(self, db_name="restaurant.db"):
         self.db_name = db_name
         self.init_db()
     
     def init_db(self):
-        """Создание таблиц при первом запуске"""
+        """Создание таблицы при первом запуске"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            
-            # Таблица с бронями
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS reservations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date TEXT NOT NULL,           -- Дата брони (ГГГГ-ММ-ДД)
-                    table_number TEXT,             -- Номер стола (может быть пустым)
-                    guest_name TEXT NOT NULL,       -- Имя гостя
-                    phone TEXT NOT NULL,            -- Телефон
-                    occasion TEXT,                  -- Повод посещения
-                    time TEXT NOT NULL,             -- Время
-                    guests_count INTEGER NOT NULL,   -- Количество гостей
-                    deposit INTEGER DEFAULT 0,       -- Депозит (рубли)
-                    created_at TEXT NOT NULL         -- Когда создана бронь
-                )
-            ''')
-            
-            # Таблица с пользователями бота
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    first_name TEXT,
-                    is_admin INTEGER DEFAULT 0,      -- 0 - обычный, 1 - администратор
+                    data TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
             ''')
-            
             conn.commit()
     
-    def add_reservation(self, date: str, table_number: str, guest_name: str, 
-                       phone: str, occasion: str, time: str, guests_count: int) -> int:
-        """Добавление новой брони"""
+    def add_reservation(self, reservation_data):
+        """Добавление брони"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            created_at = datetime.datetime.now().isoformat()
-            
-            cursor.execute('''
-                INSERT INTO reservations 
-                (date, table_number, guest_name, phone, occasion, time, guests_count, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (date, table_number, guest_name, phone, occasion, time, guests_count, created_at))
-            
+            created_at = datetime.now().isoformat()
+            # Преобразуем словарь в JSON строку для хранения
+            data_json = json.dumps(reservation_data, ensure_ascii=False)
+            cursor.execute(
+                'INSERT INTO reservations (data, created_at) VALUES (?, ?)',
+                (data_json, created_at)
+            )
             conn.commit()
             return cursor.lastrowid
     
-    def update_table_number(self, reservation_id: int, new_table_number: str):
-        """Обновление номера стола"""
+    def get_all_reservations(self):
+        """Получение всех броней"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE reservations 
-                SET table_number = ? 
-                WHERE id = ?
-            ''', (new_table_number, reservation_id))
-            conn.commit()
+            cursor.execute('SELECT id, data, created_at FROM reservations ORDER BY id')
+            rows = cursor.fetchall()
+            
+            reservations = []
+            for row in rows:
+                res_data = json.loads(row[1])
+                res_data['id'] = row[0]  # Добавляем ID из базы
+                reservations.append(res_data)
+            return reservations
     
-    def update_deposit(self, reservation_id: int, deposit: int):
-        """Обновление суммы депозита"""
-        with sqlite3.connect(self.db_name) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE reservations 
-                SET deposit = ? 
-                WHERE id = ?
-            ''', (deposit, reservation_id))
-            conn.commit()
-    
-    def get_today_reservations(self) -> List[Tuple]:
+    def get_today_reservations(self):
         """Получение броней на сегодня"""
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
-        return self.get_reservations_by_date(today)
+        today = datetime.now().strftime("%Y-%m-%d")
+        all_res = self.get_all_reservations()
+        return [r for r in all_res if r.get('date') == today]
     
-    def get_reservations_by_date(self, date: str) -> List[Tuple]:
-        """Получение броней на конкретную дату"""
+    def search_reservations(self, search_term):
+        """Поиск броней"""
+        all_res = self.get_all_reservations()
+        results = []
+        search_term_lower = search_term.lower()
+        
+        for r in all_res:
+            if (search_term_lower in r.get('name', '').lower() or 
+                search_term in r.get('phone', '') or
+                search_term_lower in r.get('occasion', '').lower()):
+                results.append(r)
+        return results
+    
+    def get_reservation_by_id(self, reservation_id):
+        """Получение брони по ID"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM reservations 
-                WHERE date = ? 
-                ORDER BY time
-            ''', (date,))
-            return cursor.fetchall()
+            cursor.execute('SELECT data FROM reservations WHERE id = ?', (reservation_id,))
+            row = cursor.fetchone()
+            if row:
+                res_data = json.loads(row[0])
+                res_data['id'] = reservation_id
+                return res_data
+            return None
     
-    def search_reservations(self, search_term: str) -> List[Tuple]:
-        """Поиск броней по имени или телефону"""
+    def update_reservation(self, reservation_id, updated_data):
+        """Обновление брони"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            # Ищем по частичному совпадению (SQL-инъекции защищены параметрами)
-            cursor.execute('''
-                SELECT * FROM reservations 
-                WHERE guest_name LIKE ? OR phone LIKE ?
-                ORDER BY date DESC, time
-            ''', (f'%{search_term}%', f'%{search_term}%'))
-            return cursor.fetchall()
-    
-    def add_user(self, user_id: int, username: str, first_name: str, is_admin: int = 0):
-        """Добавление пользователя бота"""
-        with sqlite3.connect(self.db_name) as conn:
-            cursor = conn.cursor()
-            created_at = datetime.datetime.now().isoformat()
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO users 
-                (user_id, username, first_name, is_admin, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user_id, username, first_name, is_admin, created_at))
-            
+            data_json = json.dumps(updated_data, ensure_ascii=False)
+            cursor.execute(
+                'UPDATE reservations SET data = ? WHERE id = ?',
+                (data_json, reservation_id)
+            )
             conn.commit()
+            return cursor.rowcount > 0
     
-    def get_all_users(self, only_admins: bool = False) -> List[Tuple]:
-        """Получение всех пользователей"""
+    def delete_reservation(self, reservation_id):
+        """Удаление брони"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            if only_admins:
-                cursor.execute('SELECT user_id FROM users WHERE is_admin = 1')
-            else:
-                cursor.execute('SELECT user_id FROM users')
-            return [row[0] for row in cursor.fetchall()]
-    
-    def is_admin(self, user_id: int) -> bool:
-        """Проверка, является ли пользователь администратором"""
-        with sqlite3.connect(self.db_name) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT is_admin FROM users WHERE user_id = ?', (user_id,))
-            result = cursor.fetchone()
-            return result and result[0] == 1
+            cursor.execute('DELETE FROM reservations WHERE id = ?', (reservation_id,))
+            conn.commit()
+            return cursor.rowcount > 0
 
-# Создаем глобальный объект базы данных
+# Создаем глобальный экземпляр базы данных
 db = Database()
