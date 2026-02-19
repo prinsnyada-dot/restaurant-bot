@@ -1,6 +1,7 @@
 import sqlite3
 import json
 from datetime import datetime
+import pytz  
 
 class Database:
     def __init__(self, db_name="restaurant.db"):
@@ -48,11 +49,31 @@ class Database:
                 reservations.append(res_data)
             return reservations
     
-    def get_today_reservations(self):
-        """Получение броней на сегодня"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        all_res = self.get_all_reservations()
-        return [r for r in all_res if r.get('date') == today]
+  def get_today_reservations(self):
+    """Получение броней на сегодня с учетом часового пояса"""
+    # Получаем сегодняшнюю дату с учетом часового пояса
+    tz = pytz.timezone("Asia/Yekaterinburg")
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    print(f"🔍 Запрос броней на дату: {today}")
+    
+    with sqlite3.connect(self.db_name) as conn:
+        cursor = conn.cursor()
+        # Ищем брони, где дата совпадает с сегодняшней
+        cursor.execute('SELECT id, data FROM reservations')
+        rows = cursor.fetchall()
+        
+        today_reservations = []
+        for row in rows:
+            res_data = json.loads(row[1])
+            res_data['id'] = row[0]
+            
+            print(f"  Проверка брони #{row[0]}: дата в базе = {res_data.get('date')}")
+            
+            if res_data.get('date') == today:
+                today_reservations.append(res_data)
+        
+        print(f"✅ Найдено броней на сегодня: {len(today_reservations)}")
+        return today_reservations
     
     def search_reservations(self, search_term):
         """Поиск броней"""
