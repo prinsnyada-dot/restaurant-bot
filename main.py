@@ -26,7 +26,7 @@ MIN_HOURS_BETWEEN_RESERVATIONS = 3  # Минимальный интервал м
 # Создаем объекты бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-python main.py
+
 # Планировщик для утренних отчетов
 scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))
 
