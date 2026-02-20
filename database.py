@@ -22,7 +22,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     data TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    date TEXT NOT NULL  -- Добавляем отдельное поле даты для быстрого поиска
+                    date TEXT NOT NULL
                 )
             ''')
             
@@ -32,16 +32,28 @@ class Database:
                 ON reservations(date)
             ''')
             
+            # ТАБЛИЦА ДЛЯ ПОЛЬЗОВАТЕЛЕЙ (НОВАЯ)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    is_admin INTEGER DEFAULT 0,
+                    is_waiter INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+            ''')
+            
             # Таблица для официантов и их столов (с датой)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS waiters (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
-                    tables TEXT NOT NULL,  -- JSON список столов
-                    date TEXT NOT NULL,     -- Дата, на которую назначены столы
+                    tables TEXT NOT NULL,
+                    date TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    UNIQUE(user_id, date)   -- Один официант - одна запись на день
+                    UNIQUE(user_id, date)
                 )
             ''')
             
@@ -57,7 +69,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     reservation_id INTEGER NOT NULL,
                     waiter_id INTEGER NOT NULL,
-                    type TEXT NOT NULL,  -- '30min', 'birthday', 'deposit'
+                    type TEXT NOT NULL,
                     sent_at TEXT NOT NULL,
                     FOREIGN KEY (reservation_id) REFERENCES reservations(id)
                 )
@@ -438,6 +450,87 @@ class Database:
                 past.append(res_data)
             
             return past
+    
+    # ====== МЕТОДЫ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ ======
+    
+    def add_user(self, user_id: int, username: str, first_name: str, is_admin: int = 0):
+        """Добавление или обновление пользователя"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            created_at = datetime.now().isoformat()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO users (user_id, username, first_name, is_admin, is_waiter, created_at)
+                VALUES (?, ?, ?, ?, COALESCE((SELECT is_waiter FROM users WHERE user_id = ?), 0), ?)
+            ''', (user_id, username, first_name, is_admin, user_id, created_at))
+            conn.commit()
+    
+    def get_user(self, user_id: int) -> dict:
+        """Получение данных пользователя"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                return {
+                    'user_id': row[0],
+                    'username': row[1],
+                    'first_name': row[2],
+                    'is_admin': row[3],
+                    'is_waiter': row[4],
+                    'created_at': row[5]
+                }
+            return None
+    
+    def set_admin(self, user_id: int, is_admin: bool):
+        """Установка прав администратора"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE users SET is_admin = ? WHERE user_id = ?
+            ''', (1 if is_admin else 0, user_id))
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def set_waiter(self, user_id: int, is_waiter: bool):
+        """Установка прав официанта"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE users SET is_waiter = ? WHERE user_id = ?
+            ''', (1 if is_waiter else 0, user_id))
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def get_all_users(self) -> list:
+        """Получение всех пользователей"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_id FROM users')
+            return [row[0] for row in cursor.fetchall()]
+    
+    def get_all_admins(self, main_admin_id: int) -> list:
+        """Получение всех администраторов"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_id, first_name FROM users WHERE is_admin = 1')
+            admins = []
+            for row in cursor.fetchall():
+                admins.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'is_main': (row[0] == main_admin_id)
+                })
+            return admins
+    
+    def get_all_waiters(self) -> list:
+        """Получение всех официантов"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_id, first_name FROM users WHERE is_waiter = 1')
+            rows = cursor.fetchall()
+            return [{'id': row[0], 'name': row[1]} for row in rows]
     
     # ====== МЕТОДЫ ДЛЯ EXCEL ФАЙЛОВ ======
     
