@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timedelta
+import pytz
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
@@ -9,19 +10,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import pytz
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
+from database import db
 
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = "8593813736:AAF0fftkjPXNz2aHVSFzQYGJ0cs7Xxw3PbY"  # ВСТАВЬ СВОЙ ТОКЕН
-MAIN_ADMIN_ID = 429549022  # ВСТАВЬ СВОЙ ID (главный администратор)
+MAIN_ADMIN_ID = 429549022  # ВСТАВЬ СВОЙ ID
 TIMEZONE = "Asia/Yekaterinburg"
-CURRENT_YEAR = 2026  # Текущий год по умолчанию
+CURRENT_YEAR = 2026
 MORNING_REPORT_HOUR = 11
 MORNING_REPORT_MINUTE = 0
-MIN_HOURS_BETWEEN_RESERVATIONS = 3  # Минимальный интервал между бронями одного стола
+MIN_HOURS_BETWEEN_RESERVATIONS = 3
 
 # Создаем объекты бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -31,12 +30,11 @@ dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))
 
 # ========== БАЗА ДАННЫХ ==========
-from database import db
 users_db = {}
 current_year = CURRENT_YEAR
-pending_reservations = {}  # Временное хранение броней, ожидающих подтверждения
-pending_deletions = {}  # Временное хранение ID для удаления
-pending_edits = {}  # Временное хранение для редактирования
+pending_reservations = {}
+pending_deletions = {}
+pending_edits = {}
 
 # ========== СОСТОЯНИЯ ==========
 class ReservationStates(StatesGroup):
@@ -127,7 +125,17 @@ def get_edit_fields_keyboard(reservation_id: int):
     ])
     return keyboard
 
-# ========== ФУНКЦИЯ ДЛЯ ПАРСИНГА ==========
+# ========== ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ СЕГОДНЯШНЕЙ ДАТЫ ==========
+
+def get_today_str():
+    """Возвращает сегодняшнюю дату в формате YYYY-MM-DD с учетом часового пояса"""
+    tz = pytz.timezone(TIMEZONE)
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    print(f"📅 Сегодня по часовому поясу {TIMEZONE}: {today}")
+    return today
+
+# ========== ФУНКЦИЯ ДЛЯ ПАРСИНГА НОМЕРА СТОЛА ==========
+
 def parse_table_number(table_text: str) -> tuple:
     """Парсит номер стола и определяет, строгий ли выбор"""
     table_text = table_text.strip()
@@ -135,6 +143,8 @@ def parse_table_number(table_text: str) -> tuple:
         return table_text[:-1], True
     else:
         return table_text, False
+
+# ========== ФУНКЦИЯ ДЛЯ ПАРСИНГА ТЕКСТА ==========
 
 def parse_reservation_text(text: str, year: int = None) -> dict:
     """Анализатор текста для извлечения данных брони"""
@@ -346,6 +356,9 @@ def parse_reservation_text(text: str, year: int = None) -> dict:
             result['name'] = 'Гость'
         else:
             result['name'] = 'Не указано'
+        
+        print(f"📅 Распознанная дата: {result['date']}")
+        print(f"🕐 Распознанное время: {result['time']}")
         return result
     
     words = re.findall(r'[а-яА-ЯёЁa-zA-Z-]+', name_text)
@@ -393,6 +406,10 @@ def parse_reservation_text(text: str, year: int = None) -> dict:
     result['name'] = re.sub(r'[^\w\s-]', '', result['name'])
     result['name'] = re.sub(r'\s+', ' ', result['name']).strip()
     
+    print(f"📅 Распознанная дата: {result['date']}")
+    print(f"🕐 Распознанное время: {result['time']}")
+    print(f"👤 Распознанное имя: {result['name']}")
+    
     return result
 
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ СО СТОЛАМИ ==========
@@ -402,7 +419,9 @@ def check_table_availability(table_number: str, date: str, time: str, exclude_re
     new_time = datetime.strptime(time, "%H:%M")
     conflicts = []
     
-    for res in reservations_db:
+    all_reservations = db.get_all_reservations()
+    
+    for res in all_reservations:
         if exclude_reservation_id and res.get('id') == exclude_reservation_id:
             continue
         
@@ -451,87 +470,16 @@ def format_reservation_for_display(res: dict) -> str:
         f"{occasion_text} {deposit_text}"
     ).strip()
 
-# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ==========
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ ==========
 
-def add_reservation(data):
-    """Добавление брони в базу данных"""
-    # Убираем авто-нумерацию, база сделает сама
-    if 'id' in data:
-        del data['id']
-    
-    reservation_id = db.add_reservation(data)
-    return reservation_id
-
-def update_reservation(reservation_id, updated_data):
-    """Обновление брони в базе"""
-    # Получаем текущие данные
-    current = db.get_reservation_by_id(reservation_id)
-    if not current:
-        return False
-    
-    # Обновляем поля
-    current.update(updated_data)
-    
-    # Сохраняем в базу (убираем id из данных для сохранения)
-    save_data = current.copy()
-    if 'id' in save_data:
-        del save_data['id']
-    
-    return db.update_reservation(reservation_id, save_data)
-
-def delete_reservation(reservation_id):
-    """Удаление брони из базы"""
-    return db.delete_reservation(reservation_id)
-
-def get_reservation_by_id(reservation_id):
-    """Получение брони из базы по ID"""
-    return db.get_reservation_by_id(reservation_id)
-
-def get_today_reservations():
-    """Получение броней на сегодня из базы"""
-    return db.get_today_reservations()
-
-def search_reservations(search_term):
-    """Поиск броней в базе"""
-    return db.search_reservations(search_term)
-
-# ========== ФУНКЦИИ ДЛЯ УПРАВЛЕНИЯ АДМИНИСТРАТОРАМИ ==========
-
-def add_admin(user_id: int):
-    """Добавление администратора"""
-    if user_id in users_db:
-        users_db[user_id]['is_admin'] = 1
-        return True
-    return False
-
-def remove_admin(user_id: int):
-    """Удаление администратора"""
-    if user_id in users_db and user_id != MAIN_ADMIN_ID:  # Нельзя удалить главного админа
-        users_db[user_id]['is_admin'] = 0
-        return True
-    return False
-
-def get_all_admins():
-    """Получение списка всех администраторов"""
-    admins = []
-    # Добавляем главного админа
-    if MAIN_ADMIN_ID in users_db:
-        admins.append({
-            'id': MAIN_ADMIN_ID,
-            'name': users_db[MAIN_ADMIN_ID].get('first_name', 'Главный админ'),
-            'is_main': True
-        })
-    
-    # Добавляем остальных админов
-    for user_id, user_data in users_db.items():
-        if user_data.get('is_admin') == 1 and user_id != MAIN_ADMIN_ID:
-            admins.append({
-                'id': user_id,
-                'name': user_data.get('first_name', 'Админ'),
-                'is_main': False
-            })
-    
-    return admins
+def add_user(user_id, username, first_name, is_admin=0):
+    """Добавление пользователя"""
+    users_db[user_id] = {
+        'username': username,
+        'first_name': first_name,
+        'is_admin': is_admin,
+        'created_at': datetime.now().isoformat()
+    }
 
 def is_admin(user_id):
     """Проверка на администратора"""
@@ -543,14 +491,40 @@ def is_main_admin(user_id):
     """Проверка на главного администратора"""
     return user_id == MAIN_ADMIN_ID
 
-def add_user(user_id, username, first_name, is_admin=0):
-    """Добавление пользователя"""
-    users_db[user_id] = {
-        'username': username,
-        'first_name': first_name,
-        'is_admin': is_admin,
-        'created_at': datetime.now().isoformat()
-    }
+def add_admin(user_id: int):
+    """Добавление администратора"""
+    if user_id in users_db:
+        users_db[user_id]['is_admin'] = 1
+        return True
+    return False
+
+def remove_admin(user_id: int):
+    """Удаление администратора"""
+    if user_id in users_db and user_id != MAIN_ADMIN_ID:
+        users_db[user_id]['is_admin'] = 0
+        return True
+    return False
+
+def get_all_admins():
+    """Получение списка всех администраторов"""
+    admins = []
+    
+    if MAIN_ADMIN_ID in users_db:
+        admins.append({
+            'id': MAIN_ADMIN_ID,
+            'name': users_db[MAIN_ADMIN_ID].get('first_name', 'Главный админ'),
+            'is_main': True
+        })
+    
+    for user_id, user_data in users_db.items():
+        if user_data.get('is_admin') == 1 and user_id != MAIN_ADMIN_ID:
+            admins.append({
+                'id': user_id,
+                'name': user_data.get('first_name', 'Админ'),
+                'is_main': False
+            })
+    
+    return admins
 
 def get_all_users():
     """Получение всех пользователей"""
@@ -564,7 +538,7 @@ async def notify_all_users(text: str, exclude_ids: list = None):
     for user_id in get_all_users():
         if user_id in exclude_ids:
             continue
-        if is_admin(user_id):  # Уведомления только админам
+        if is_admin(user_id):
             try:
                 await bot.send_message(user_id, text, parse_mode="Markdown")
             except Exception as e:
@@ -648,7 +622,11 @@ async def button_today(message: Message):
         await message.answer("❌ У вас нет прав.")
         return
     
-    reservations = get_today_reservations()
+    today = get_today_str()
+    reservations = db.get_today_reservations()
+    
+    print(f"📋 Запрос броней на сегодня: {today}")
+    print(f"📊 Найдено броней: {len(reservations)}")
     
     if not reservations:
         await message.answer("📭 На сегодня броней нет.")
@@ -657,7 +635,6 @@ async def button_today(message: Message):
     reservations.sort(key=lambda x: x.get('time', '00:00'))
     
     for r in reservations:
-        # Для каждой брони показываем кнопки действий
         text = format_reservation_for_display(r)
         await message.answer(
             text,
@@ -709,13 +686,13 @@ async def button_excel(message: Message):
         await message.answer("❌ У вас нет прав.")
         return
     
-    reservations = get_today_reservations()
+    reservations = db.get_today_reservations()
     
     if not reservations:
         await message.answer("📭 На сегодня броней нет.")
         return
     
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_today_str()
     filepath = ExcelGenerator.create_reservation_file(reservations, today)
     
     document = FSInputFile(filepath)
@@ -740,7 +717,6 @@ async def button_management(message: Message):
             reply_markup=get_admin_management_keyboard()
         )
     else:
-        # Обычные админы видят только информацию
         await message.answer(
             f"**⚙️ Настройки**\n\n"
             f"📅 Текущий год: {current_year}\n"
@@ -785,7 +761,7 @@ async def button_remove_admin(message: Message, state: FSMContext):
     
     text = "**📋 Список администраторов:**\n\n"
     for admin in admins:
-        if not admin['is_main']:  # Не показываем главного для удаления
+        if not admin['is_main']:
             text += f"🆔 {admin['id']} | {admin['name']}\n"
     
     text += "\nВведите ID администратора для удаления:"
@@ -823,11 +799,11 @@ async def button_back_to_main(message: Message):
 async def button_cancel(message: Message, state: FSMContext):
     """Кнопка отмены действия"""
     await state.clear()
-    if 'pending_reservations' in globals() and message.from_user.id in pending_reservations:
+    if message.from_user.id in pending_reservations:
         del pending_reservations[message.from_user.id]
-    if 'pending_deletions' in globals() and message.from_user.id in pending_deletions:
+    if message.from_user.id in pending_deletions:
         del pending_deletions[message.from_user.id]
-    if 'pending_edits' in globals() and message.from_user.id in pending_edits:
+    if message.from_user.id in pending_edits:
         del pending_edits[message.from_user.id]
     
     await message.answer(
@@ -841,12 +817,9 @@ async def button_cancel(message: Message, state: FSMContext):
 async def process_new_admin_id(message: Message, state: FSMContext):
     """Обработка ID нового администратора"""
     try:
-        # Пробуем распарсить ID из сообщения
         text = message.text.strip()
         
-        # Если это пересланное сообщение от userinfobot
         if '#' in text:
-            # Ищем ID в формате "ID: 123456789"
             id_match = re.search(r'ID:\s*(\d+)', text)
             if id_match:
                 new_admin_id = int(id_match.group(1))
@@ -854,10 +827,8 @@ async def process_new_admin_id(message: Message, state: FSMContext):
                 await message.answer("❌ Не удалось найти ID в сообщении. Отправьте просто число или перешлите сообщение от @userinfobot.")
                 return
         else:
-            # Просто число
             new_admin_id = int(text)
         
-        # Проверяем, существует ли пользователь
         if new_admin_id not in users_db:
             await message.answer(
                 f"❌ Пользователь с ID {new_admin_id} еще не запускал бота.\n"
@@ -865,7 +836,6 @@ async def process_new_admin_id(message: Message, state: FSMContext):
             )
             return
         
-        # Добавляем администратора
         if add_admin(new_admin_id):
             user_info = users_db[new_admin_id]
             await message.answer(
@@ -876,7 +846,6 @@ async def process_new_admin_id(message: Message, state: FSMContext):
                 reply_markup=get_admin_management_keyboard()
             )
             
-            # Уведомляем нового админа
             try:
                 await bot.send_message(
                     new_admin_id,
@@ -918,7 +887,6 @@ async def process_remove_admin_id(message: Message, state: FSMContext):
                 reply_markup=get_admin_management_keyboard()
             )
             
-            # Уведомляем бывшего админа
             try:
                 await bot.send_message(
                     admin_id,
@@ -942,13 +910,12 @@ async def process_remove_admin_id(message: Message, state: FSMContext):
 async def process_delete_callback(callback: CallbackQuery, state: FSMContext):
     """Обработка нажатия на кнопку удаления"""
     reservation_id = int(callback.data.split('_')[1])
-    reservation = get_reservation_by_id(reservation_id)
+    reservation = db.get_reservation_by_id(reservation_id)
     
     if not reservation:
         await callback.answer("❌ Бронь не найдена")
         return
     
-    # Сохраняем ID для подтверждения
     pending_deletions[callback.from_user.id] = reservation_id
     
     await callback.message.edit_text(
@@ -975,9 +942,9 @@ async def process_confirm_delete(callback: CallbackQuery):
         return
     
     reservation_id = pending_deletions[user_id]
-    reservation = delete_reservation(reservation_id)
+    reservation = db.get_reservation_by_id(reservation_id)
     
-    if reservation:
+    if db.delete_reservation(reservation_id):
         await callback.message.edit_text(
             f"✅ Бронь #{reservation_id} удалена.\n\n"
             f"Удаленная бронь:\n"
@@ -985,9 +952,8 @@ async def process_confirm_delete(callback: CallbackQuery):
             parse_mode="Markdown"
         )
         
-        # Уведомление об удалении
-        today = datetime.now().strftime("%Y-%m-%d")
-        if reservation.get('date') == today:
+        today = get_today_str()
+        if reservation and reservation.get('date') == today:
             await notify_all_users(
                 f"🗑 Бронь #{reservation_id} отменена:\n"
                 f"{reservation.get('time')} | {reservation.get('name')} | Стол {reservation.get('table_number', '?')}",
@@ -1005,7 +971,7 @@ async def process_cancel_delete(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id in pending_deletions:
         reservation_id = pending_deletions[user_id]
-        reservation = get_reservation_by_id(reservation_id)
+        reservation = db.get_reservation_by_id(reservation_id)
         
         if reservation:
             await callback.message.edit_text(
@@ -1021,7 +987,7 @@ async def process_cancel_delete(callback: CallbackQuery):
 async def process_edit_callback(callback: CallbackQuery):
     """Обработка нажатия на кнопку редактирования"""
     reservation_id = int(callback.data.split('_')[1])
-    reservation = get_reservation_by_id(reservation_id)
+    reservation = db.get_reservation_by_id(reservation_id)
     
     if not reservation:
         await callback.answer("❌ Бронь не найдена")
@@ -1043,7 +1009,7 @@ async def process_edit_field(callback: CallbackQuery, state: FSMContext):
     field = parts[1]
     reservation_id = int(parts[2])
     
-    reservation = get_reservation_by_id(reservation_id)
+    reservation = db.get_reservation_by_id(reservation_id)
     if not reservation:
         await callback.answer("❌ Бронь не найдена")
         return
@@ -1070,13 +1036,11 @@ async def process_edit_field(callback: CallbackQuery, state: FSMContext):
         'occasion': reservation.get('occasion', '')
     }
     
-    # Сохраняем данные в состоянии
     await state.update_data(
         edit_reservation_id=reservation_id,
         edit_field=field
     )
     
-    # Подсказки для ввода
     hints = {
         'name': 'Введите новое имя гостя',
         'phone': 'Введите новый номер телефона',
@@ -1109,7 +1073,7 @@ async def process_edit_value(message: Message, state: FSMContext):
     reservation_id = data.get('edit_reservation_id')
     field = data.get('edit_field')
     
-    reservation = get_reservation_by_id(reservation_id)
+    reservation = db.get_reservation_by_id(reservation_id)
     if not reservation:
         await message.answer("❌ Бронь не найдена")
         await state.clear()
@@ -1117,13 +1081,11 @@ async def process_edit_value(message: Message, state: FSMContext):
     
     new_value = message.text.strip()
     
-    # Валидация в зависимости от поля
     valid = True
     error_msg = ""
     
     if field == 'date':
         try:
-            # Парсим дату
             date_obj = datetime.strptime(new_value, "%d.%m")
             new_value = f"{current_year:04d}-{date_obj.month:02d}-{date_obj.day:02d}"
         except ValueError:
@@ -1139,7 +1101,6 @@ async def process_edit_value(message: Message, state: FSMContext):
             error_msg = "❌ Неверный формат времени. Используйте ЧЧ:ММ"
     
     elif field == 'table':
-        # Проверяем формат стола
         table_match = re.match(r'^(\d+!?)$', new_value)
         if not table_match:
             valid = False
@@ -1147,7 +1108,6 @@ async def process_edit_value(message: Message, state: FSMContext):
         else:
             table_num, is_strict = parse_table_number(new_value)
             new_value = table_num
-            # Проверяем доступность стола
             availability = check_table_availability(
                 table_num,
                 reservation.get('date'),
@@ -1162,6 +1122,8 @@ async def process_edit_value(message: Message, state: FSMContext):
                     f"В {conflict['time']} бронь на {conflict['name']}\n"
                     f"Введите другой номер стола"
                 )
+            else:
+                await state.update_data(table_strict=is_strict)
     
     elif field == 'guests':
         try:
@@ -1195,13 +1157,12 @@ async def process_edit_value(message: Message, state: FSMContext):
         await message.answer(error_msg)
         return
     
-    # Обновляем бронь
     update_data = {field: new_value}
     if field == 'table':
-        update_data['table_strict'] = '!' in message.text
+        update_data['table_strict'] = data.get('table_strict', False)
     
-    if update_reservation(reservation_id, update_data):
-        updated_reservation = get_reservation_by_id(reservation_id)
+    if db.update_reservation(reservation_id, update_data):
+        updated_reservation = db.get_reservation_by_id(reservation_id)
         
         await message.answer(
             f"✅ Бронь #{reservation_id} обновлена!\n\n"
@@ -1209,9 +1170,8 @@ async def process_edit_value(message: Message, state: FSMContext):
             parse_mode="Markdown"
         )
         
-        # Уведомление об изменении
-        today = datetime.now().strftime("%Y-%m-%d")
-        if updated_reservation.get('date') == today:
+        today = get_today_str()
+        if updated_reservation and updated_reservation.get('date') == today:
             await notify_all_users(
                 f"✏️ Изменена бронь #{reservation_id}\n"
                 f"{format_reservation_for_display(updated_reservation)}",
@@ -1229,12 +1189,11 @@ async def process_edit_value(message: Message, state: FSMContext):
 @dp.callback_query(lambda c: c.data == "back_to_reservation")
 async def back_to_reservation(callback: CallbackQuery):
     """Возврат к просмотру брони"""
-    # Ищем ID брони из предыдущего сообщения
     import re
     id_match = re.search(r'#(\d+)', callback.message.text)
     if id_match:
         reservation_id = int(id_match.group(1))
-        reservation = get_reservation_by_id(reservation_id)
+        reservation = db.get_reservation_by_id(reservation_id)
         if reservation:
             await callback.message.edit_text(
                 format_reservation_for_display(reservation),
@@ -1256,14 +1215,14 @@ async def back_to_search(callback: CallbackQuery):
 @dp.message(F.text, ReservationStates.waiting_for_search_delete)
 async def process_search(message: Message, state: FSMContext):
     """Обработка поиска"""
-    results = search_reservations(message.text)
+    results = db.search_reservations(message.text)
     
     if not results:
         await message.answer("❌ Ничего не найдено.")
     else:
         results.sort(key=lambda x: x.get('date', ''), reverse=True)
         
-        for r in results[:10]:  # Показываем первые 10 результатов
+        for r in results[:10]:
             await message.answer(
                 format_reservation_for_display(r),
                 parse_mode="Markdown",
@@ -1290,20 +1249,16 @@ async def process_table_change(message: Message, state: FSMContext):
     
     new_table = message.text.strip()
     
-    # Проверяем, что ввели число
     if not new_table.isdigit():
         await message.answer("❌ Номер стола должен быть числом. Попробуйте снова:")
         return
     
-    # Получаем сохраненную бронь
     pending = pending_reservations[user_id]
     parsed = pending['parsed']
     
-    # Обновляем номер стола
     parsed['table_number'] = new_table
     parsed['table_strict'] = False
     
-    # Проверяем новый стол
     availability = check_table_availability(
         parsed['table_number'],
         parsed['date'],
@@ -1311,8 +1266,7 @@ async def process_table_change(message: Message, state: FSMContext):
     )
     
     if availability['available']:
-        # Стол свободен - создаем бронь
-        reservation_id = add_reservation(parsed)
+        reservation_id = db.add_reservation(parsed)
         del pending_reservations[user_id]
         
         table_text = f"{parsed['table_number']}"
@@ -1336,8 +1290,7 @@ async def process_table_change(message: Message, state: FSMContext):
         
         await message.answer(reservation_text, parse_mode="Markdown")
         
-        # Уведомление
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = get_today_str()
         if parsed['date'] == today:
             await notify_all_users(reservation_text, exclude_ids=[user_id])
         
@@ -1347,7 +1300,6 @@ async def process_table_change(message: Message, state: FSMContext):
             reply_markup=get_main_keyboard()
         )
     else:
-        # Снова конфликт
         conflict = availability['conflicts'][0]
         await message.answer(
             f"⚠️ Стол **{new_table}** тоже занят!\n"
@@ -1362,14 +1314,11 @@ async def process_any_text(message: Message, state: FSMContext):
     """Обработка любого текста - пытаемся создать бронь"""
     user_id = message.from_user.id
     
-    # Проверяем права
     if not is_admin(user_id):
         return
     
-    # Парсим текст
     parsed = parse_reservation_text(message.text, current_year)
     
-    # Проверяем обязательные поля
     errors = []
     if not parsed['name'] or parsed['name'] == 'Не указано':
         errors.append("❌ Не удалось определить имя гостя")
@@ -1389,7 +1338,6 @@ async def process_any_text(message: Message, state: FSMContext):
         )
         return
     
-    # Проверяем доступность стола
     availability = check_table_availability(
         parsed['table_number'],
         parsed['date'],
@@ -1397,7 +1345,6 @@ async def process_any_text(message: Message, state: FSMContext):
     )
     
     if not availability['available']:
-        # Конфликт - сохраняем бронь и предлагаем изменить стол
         pending_reservations[user_id] = {
             'parsed': parsed,
             'original_text': message.text
@@ -1418,8 +1365,7 @@ async def process_any_text(message: Message, state: FSMContext):
         await state.set_state(ReservationStates.waiting_for_table_change)
         return
     
-    # Стол свободен - создаем бронь
-    reservation_id = add_reservation(parsed)
+    reservation_id = db.add_reservation(parsed)
     
     table_text = f"{parsed['table_number']}"
     if parsed['table_strict']:
@@ -1442,8 +1388,7 @@ async def process_any_text(message: Message, state: FSMContext):
     
     await message.answer(reservation_text, parse_mode="Markdown")
     
-    # Уведомление
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_today_str()
     if parsed['date'] == today:
         await notify_all_users(reservation_text, exclude_ids=[user_id])
 
@@ -1470,11 +1415,31 @@ async def cmd_set_year(message: Message):
     except ValueError:
         await message.answer("❌ Введите число")
 
+@dp.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Отладка - показать все брони"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    all_res = db.get_all_reservations()
+    today = get_today_str()
+    
+    text = f"**🔧 Отладка**\n"
+    text += f"Сегодня: {today}\n"
+    text += f"Всего броней: {len(all_res)}\n\n"
+    
+    for r in all_res:
+        text += f"ID {r['id']}: дата={r.get('date')}, имя={r.get('name')}\n"
+        if r.get('date') == today:
+            text += "  ⬅️ СЕГОДНЯ!\n"
+    
+    await message.answer(text, parse_mode="Markdown")
+
 # ========== УТРЕННИЙ ОТЧЕТ ==========
 async def send_morning_report():
     """Отправка утреннего отчета"""
-    today = datetime.now().strftime("%Y-%m-%d")
-    reservations = get_today_reservations()
+    today = get_today_str()
+    reservations = db.get_today_reservations()
     
     if not reservations:
         text = f"📋 **Утренний отчет {today}**\n\nНа сегодня броней нет."
@@ -1512,6 +1477,7 @@ async def on_startup():
     scheduler.start()
     print(f"✅ Планировщик запущен")
     print(f"✅ Главный администратор ID: {MAIN_ADMIN_ID}")
+    print(f"✅ Текущий год: {current_year}")
 
 async def main():
     """Главная функция"""
