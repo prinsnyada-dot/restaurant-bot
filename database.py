@@ -1,7 +1,7 @@
 import sqlite3
 import json
 from datetime import datetime
-import pytz  
+import pytz
 
 class Database:
     def __init__(self, db_name="restaurant.db"):
@@ -26,7 +26,6 @@ class Database:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             created_at = datetime.now().isoformat()
-            # Преобразуем словарь в JSON строку для хранения
             data_json = json.dumps(reservation_data, ensure_ascii=False)
             cursor.execute(
                 'INSERT INTO reservations (data, created_at) VALUES (?, ?)',
@@ -45,35 +44,49 @@ class Database:
             reservations = []
             for row in rows:
                 res_data = json.loads(row[1])
-                res_data['id'] = row[0]  # Добавляем ID из базы
+                res_data['id'] = row[0]
                 reservations.append(res_data)
             return reservations
     
-  def get_today_reservations(self):
-    """Получение броней на сегодня с учетом часового пояса"""
-    # Получаем сегодняшнюю дату с учетом часового пояса
-    tz = pytz.timezone("Asia/Yekaterinburg")
-    today = datetime.now(tz).strftime("%Y-%m-%d")
-    print(f"🔍 Запрос броней на дату: {today}")
+    def get_today_reservations(self):
+        """Получение броней на сегодня с учетом часового пояса"""
+        tz = pytz.timezone("Asia/Yekaterinburg")
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        print(f"🔍 Запрос броней на дату: {today}")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, data FROM reservations')
+            rows = cursor.fetchall()
+            
+            today_reservations = []
+            for row in rows:
+                res_data = json.loads(row[1])
+                res_data['id'] = row[0]
+                
+                print(f"  Проверка брони #{row[0]}: дата в базе = {res_data.get('date')}")
+                
+                if res_data.get('date') == today:
+                    today_reservations.append(res_data)
+            
+            print(f"✅ Найдено броней на сегодня: {len(today_reservations)}")
+            return today_reservations
     
-    with sqlite3.connect(self.db_name) as conn:
-        cursor = conn.cursor()
-        # Ищем брони, где дата совпадает с сегодняшней
-        cursor.execute('SELECT id, data FROM reservations')
-        rows = cursor.fetchall()
-        
-        today_reservations = []
-        for row in rows:
-            res_data = json.loads(row[1])
-            res_data['id'] = row[0]
+    def get_reservations_by_date(self, date):
+        """Получение броней по конкретной дате"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, data FROM reservations')
+            rows = cursor.fetchall()
             
-            print(f"  Проверка брони #{row[0]}: дата в базе = {res_data.get('date')}")
+            date_reservations = []
+            for row in rows:
+                res_data = json.loads(row[1])
+                if res_data.get('date') == date:
+                    res_data['id'] = row[0]
+                    date_reservations.append(res_data)
             
-            if res_data.get('date') == today:
-                today_reservations.append(res_data)
-        
-        print(f"✅ Найдено броней на сегодня: {len(today_reservations)}")
-        return today_reservations
+            return date_reservations
     
     def search_reservations(self, search_term):
         """Поиск броней"""
@@ -102,9 +115,22 @@ class Database:
     
     def update_reservation(self, reservation_id, updated_data):
         """Обновление брони"""
+        # Получаем текущие данные
+        current = self.get_reservation_by_id(reservation_id)
+        if not current:
+            return False
+        
+        # Обновляем поля
+        current.update(updated_data)
+        
+        # Сохраняем в базу
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            data_json = json.dumps(updated_data, ensure_ascii=False)
+            save_data = current.copy()
+            if 'id' in save_data:
+                del save_data['id']
+            
+            data_json = json.dumps(save_data, ensure_ascii=False)
             cursor.execute(
                 'UPDATE reservations SET data = ? WHERE id = ?',
                 (data_json, reservation_id)
