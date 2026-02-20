@@ -13,6 +13,17 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import db
 
+import sys
+import traceback
+
+# Включаем подробный вывод ошибок
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+print("🔧 Режим отладки включен")
+
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = "8593813736:AAF0fftkjPXNz2aHVSFzQYGJ0cs7Xxw3PbY"  # ВСТАВЬ СВОЙ ТОКЕН
 MAIN_ADMIN_ID = 429549022  # ВСТАВЬ СВОЙ ID
@@ -1486,4 +1497,10 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        print("🚀 Запуск бота...")
+        asyncio.run(main())
+    except Exception as e:
+        print(f"❌ Критическая ошибка: {e}")
+        traceback.print_exc()
+        sys.exit(1)
