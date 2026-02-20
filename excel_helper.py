@@ -3,17 +3,42 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 import datetime
 import os
-from typing import List, Tuple, Dict
+from typing import List, Dict
 
 class ExcelGenerator:
     """Класс для создания Excel таблиц с бронями"""
     
     @staticmethod
-    def create_reservation_file(reservations: List[Dict], date: str) -> str:
+    def get_waiter_name_for_table(table_number: str, date: str, db) -> str:
+        """
+        Получает имя официанта для конкретного стола на указанную дату
+        """
+        try:
+            waiters = db.get_waiters_for_table_on_date_with_names(table_number, date)
+            if waiters:
+                # Если несколько официантов на один стол, объединяем имена
+                return ", ".join(waiters)
+            return ""
+        except Exception as e:
+            print(f"Ошибка при получении имени официанта: {e}")
+            return ""
+    
+    @staticmethod
+    def get_deposit_status_symbol(deposit: int, deposit_paid: int) -> str:
+        """
+        Возвращает символ статуса депозита: ❌ или ✅
+        """
+        if deposit > 0:
+            return "✅" if deposit_paid == 1 else "❌"
+        return ""
+    
+    @staticmethod
+    def create_reservation_file(reservations: List[Dict], date: str, db=None) -> str:
         """
         Создает Excel файл с бронями на указанную дату
         reservations: список словарей с данными броней
         date: дата в формате YYYY-MM-DD
+        db: объект базы данных для получения имен официантов
         Возвращает путь к созданному файлу
         """
         # Создаем новую книгу Excel
@@ -21,10 +46,10 @@ class ExcelGenerator:
         ws = wb.active
         ws.title = f"Брони {date}"
         
-        # Заголовки столбцов
+        # Заголовки столбцов (ДОБАВЛЕН СТОЛБЕЦ "Статус депозита")
         headers = [
             "ID", "Дата", "Стол", "Имя гостя", "Телефон", 
-            "Повод", "Время", "Гостей", "Депозит (₽)"
+            "Повод", "Время", "Гостей", "Депозит (₽)", "Статус депозита", "Официант"
         ]
         
         # Форматирование заголовков
@@ -49,17 +74,30 @@ class ExcelGenerator:
         )
         
         for row_num, res in enumerate(reservations, 2):
-            # Получаем данные из словаря по ключам
+            table_number = res.get('table_number', '')
+            deposit = res.get('deposit', 0)
+            deposit_paid = res.get('deposit_paid', 0)
+            
+            # Получаем имя официанта для этого стола
+            waiter_name = ""
+            if db and table_number:
+                waiter_name = ExcelGenerator.get_waiter_name_for_table(table_number, date, db)
+            
+            # Получаем символ статуса депозита
+            deposit_status = ExcelGenerator.get_deposit_status_symbol(deposit, deposit_paid)
+            
             row_data = [
                 res.get('id', ''),                    # ID
                 res.get('date', ''),                   # Дата
-                res.get('table_number', 'Не назначен'), # Стол
+                table_number if table_number else 'Не назначен',  # Стол
                 res.get('name', ''),                    # Имя
                 res.get('phone', ''),                   # Телефон
                 res.get('occasion', '-'),                # Повод
                 res.get('time', ''),                     # Время
                 res.get('guests', ''),                   # Гости
-                res.get('deposit', 0)                    # Депозит
+                deposit if deposit > 0 else '',          # Депозит
+                deposit_status,                          # Статус депозита (❌ или ✅)
+                waiter_name                               # Официант
             ]
             
             for col_num, value in enumerate(row_data, 1):
@@ -72,6 +110,12 @@ class ExcelGenerator:
                     cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                 elif col_num == 9 and value and int(value) == 0:
                     cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                
+                # Форматирование статуса депозита
+                if col_num == 10 and value == "✅":
+                    cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                elif col_num == 10 and value == "❌":
+                    cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
         # Автоматическая ширина колонок
         for col in range(1, len(headers) + 1):
@@ -97,37 +141,4 @@ class ExcelGenerator:
         
         wb.save(filepath)
         print(f"✅ Excel файл сохранен: {filepath}")
-        return filepath
-    
-    @staticmethod
-    def create_reservation_file_simple(reservations: List[Dict], date: str) -> str:
-        """
-        Упрощенная версия для отладки - создает текстовый файл
-        """
-        filename = f"reservations_{date}.txt"
-        os.makedirs("excel_files", exist_ok=True)
-        filepath = os.path.join("excel_files", filename)
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(f"Брони на {date}\n")
-            f.write("="*60 + "\n\n")
-            
-            for r in sorted(reservations, key=lambda x: x.get('time', '00:00')):
-                f.write(f"ID: {r.get('id')}\n")
-                f.write(f"Время: {r.get('time')}\n")
-                f.write(f"Имя: {r.get('name')}\n")
-                f.write(f"Телефон: {r.get('phone')}\n")
-                f.write(f"Гостей: {r.get('guests')}\n")
-                
-                table = r.get('table_number', '')
-                if table:
-                    strict = " (выбор гостя)" if r.get('table_strict') else ""
-                    f.write(f"Стол: {table}{strict}\n")
-                
-                if r.get('occasion'):
-                    f.write(f"Повод: {r.get('occasion')}\n")
-                if r.get('deposit', 0) > 0:
-                    f.write(f"Депозит: {r.get('deposit')}₽\n")
-                f.write("-"*40 + "\n")
-        
         return filepath

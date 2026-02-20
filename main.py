@@ -4,6 +4,7 @@ import re
 import os
 import sys
 import traceback
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Tuple, List, Optional
 
@@ -35,7 +36,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ Ошибка: BOT_TOKEN не установлен в переменных окружения!")
 
-MAIN_ADMIN_ID = 429549022  # Замени на свой ID
+MAIN_ADMIN_ID = 123456789  # Замени на свой ID
 TIMEZONE = "Asia/Yekaterinburg"
 CURRENT_YEAR = 2026
 MORNING_REPORT_HOUR = 11
@@ -49,12 +50,13 @@ dp = Dispatcher(storage=MemoryStorage())
 # Планировщик для утренних отчетов и уведомлений
 scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))
 
-# ========== БАЗА ДАННЫХ ==========
+# ========== БАЗА ДАННЫХ В ПАМЯТИ ==========
 users_db = {}
 current_year = CURRENT_YEAR
 pending_reservations = {}
 pending_deletions = {}
 pending_edits = {}
+pending_payments = {}  # Для подтверждения оплаты депозита
 
 # ========== СОСТОЯНИЯ ==========
 class ReservationStates(StatesGroup):
@@ -68,6 +70,7 @@ class ReservationStates(StatesGroup):
     waiting_for_search_edit = State()
     waiting_for_waiter_tables = State()
     waiting_for_year = State()
+    waiting_for_waiter_name = State()  # Для редактирования имени официанта
 
 # ========== ФУНКЦИИ ДЛЯ ПАРСИНГА СПИСКА СТОЛОВ ==========
 
@@ -206,6 +209,20 @@ def get_all_admins() -> List[dict]:
     """Получение списка всех администраторов"""
     return db.get_all_admins(MAIN_ADMIN_ID)
 
+async def notify_all_users(text: str, exclude_ids: list = None) -> None:
+    """Отправка уведомлений всем"""
+    if exclude_ids is None:
+        exclude_ids = []
+    
+    for user_id in get_all_users():
+        if user_id in exclude_ids:
+            continue
+        if is_admin(user_id) or is_waiter(user_id):
+            try:
+                await bot.send_message(user_id, text, parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Не удалось отправить пользователю {user_id}: {e}")
+
 # ========== КЛАВИАТУРЫ ==========
 
 def get_main_keyboard(user_id: int = None):
@@ -275,15 +292,26 @@ def get_admin_management_keyboard():
     )
     return keyboard
 
-def get_reservation_action_keyboard(reservation_id: int):
+def get_reservation_action_keyboard(reservation_id: int, deposit: int = 0, deposit_paid: int = 0):
     """Клавиатура для действий с бронью"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_{reservation_id}"),
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{reservation_id}")
-        ],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_search")]
+    buttons = []
+    
+    # Кнопки редактирования и удаления
+    buttons.append([
+        InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_{reservation_id}"),
+        InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{reservation_id}")
     ])
+    
+    # Кнопка для отметки оплаты депозита (только если есть депозит и он не оплачен)
+    if deposit > 0 and deposit_paid == 0:
+        buttons.append([
+            InlineKeyboardButton(text="✅ Отметить оплату депозита", callback_data=f"pay_deposit_{reservation_id}")
+        ])
+    
+    # Кнопка назад
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_search")])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     return keyboard
 
 def get_edit_fields_keyboard(reservation_id: int):
@@ -333,6 +361,7 @@ def parse_reservation_text(text: str, year: int = None) -> dict:
         'time': '',
         'guests': 1,
         'deposit': 0,
+        'deposit_paid': 0,  # По умолчанию не оплачен
         'occasion': '',
         'table_number': '',
         'table_strict': False,
@@ -483,6 +512,7 @@ def parse_reservation_text(text: str, year: int = None) -> dict:
             
             if deposit >= 1000:
                 result['deposit'] = deposit
+                # По умолчанию депозит не оплачен (0)
                 original_text = original_text.replace(deposit_match.group(0), '')
                 break
     
@@ -640,6 +670,15 @@ def check_table_availability(table_number: str, date: str, time: str, exclude_re
 def format_reservation_for_display(res: dict) -> str:
     """Форматирует бронь для отображения"""
     deposit_text = f"💰 Депозит: {res.get('deposit', 0)}₽" if res.get('deposit', 0) > 0 else ""
+    
+    # Добавляем визуальный статус депозита
+    deposit_status = ""
+    if res.get('deposit', 0) > 0:
+        if res.get('deposit_paid', 0) == 1:
+            deposit_status = " ✅ ОПЛАЧЕН"
+        else:
+            deposit_status = " ❌ НЕ ОПЛАЧЕН"
+    
     occasion_text = f"🎉 {res.get('occasion', '')}" if res.get('occasion') else ""
     table_text = res.get('table_number', 'Не назначен')
     if res.get('table_strict'):
@@ -651,7 +690,7 @@ def format_reservation_for_display(res: dict) -> str:
         f"👤 {res.get('name', '?')}\n"
         f"📞 {res.get('phone', '?')} | 👥 {res.get('guests', '?')} чел.\n"
         f"🪑 Стол: {table_text}\n"
-        f"{occasion_text} {deposit_text}"
+        f"{occasion_text} {deposit_text}{deposit_status}\n"
     ).strip()
 
 # ========== ХЕНДЛЕРЫ КОМАНД ==========
@@ -679,7 +718,7 @@ async def cmd_start(message: Message):
         # Если почему-то нет в БД, создаем запись
         add_user(user.id, user.username, user.first_name, is_admin_user)
     
-    # Проверяем, является ли пользователь официантом (уже назначенным)
+    # Проверяем, является ли пользователь официантом
     waiter_tables = db.get_waiter_tables_for_date(user.id)
     
     welcome_text = f"👋 Добро пожаловать, {user.first_name}!\n"
@@ -725,7 +764,11 @@ async def button_today(message: Message):
         await message.answer(
             text,
             parse_mode="Markdown",
-            reply_markup=get_reservation_action_keyboard(r['id'])
+            reply_markup=get_reservation_action_keyboard(
+                r['id'], 
+                r.get('deposit', 0), 
+                r.get('deposit_paid', 0)
+            )
         )
 
 @dp.message(F.text == "📋 Все брони")
@@ -748,7 +791,11 @@ async def button_all_reservations(message: Message):
         await message.answer(
             text,
             parse_mode="Markdown",
-            reply_markup=get_reservation_action_keyboard(r['id'])
+            reply_markup=get_reservation_action_keyboard(
+                r['id'], 
+                r.get('deposit', 0), 
+                r.get('deposit_paid', 0)
+            )
         )
 
 @dp.message(F.text == "📋 Мои брони")
@@ -838,7 +885,7 @@ async def button_excel(message: Message):
         return
     
     today = get_today_str()
-    filepath = ExcelGenerator.create_reservation_file(reservations, today)
+    filepath = ExcelGenerator.create_reservation_file(reservations, today, db)
     db.save_excel_file(f"reservations_{today}.xlsx", today, filepath)
     
     document = FSInputFile(filepath)
@@ -990,7 +1037,7 @@ async def button_list_admins(message: Message):
     await message.answer(text, parse_mode="Markdown", reply_markup=get_admin_management_keyboard())
 
 @dp.message(F.text == "📋 Список официантов")
-async def button_list_waiters(message: Message):
+async def button_list_waiters(message: Message, state: FSMContext):
     """Кнопка списка официантов"""
     if not is_main_admin(message.from_user.id):
         await message.answer("❌ Только главный администратор может просматривать список.")
@@ -1002,18 +1049,14 @@ async def button_list_waiters(message: Message):
     waiters_with_tables = db.get_all_waiters_for_date(today)
     
     # Все официанты с ролью
-    all_waiters = db.get_all_users_with_waiter_role() if hasattr(db, 'get_all_users_with_waiter_role') else []
-    
-    if not all_waiters:
-        # Если метод не добавлен, используем waiters_with_tables
-        all_waiters = [{'id': w['id'], 'name': w['name']} for w in waiters_with_tables]
+    all_waiters = db.get_all_users_with_waiter_role()
     
     if not all_waiters:
         await message.answer("📭 Нет пользователей с ролью официанта.")
         return
     
-    text = f"**👥 Официанты на {today}:**\n\n"
-    
+    # Создаем клавиатуру с кнопками для каждого официанта
+    keyboard_buttons = []
     for w in all_waiters:
         # Проверяем, есть ли у этого официанта столы на сегодня
         has_tables = False
@@ -1025,11 +1068,25 @@ async def button_list_waiters(message: Message):
                 tables_str = f"✅ {', '.join(wt['tables'])}"
                 break
         
-        status = "🟢" if has_tables else "🔴"
-        text += f"{status} {w['name']} (ID: {w['id']})\n"
-        text += f"   Столы: {tables_str}\n\n"
+        # Добавляем кнопку для редактирования имени
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text=f"{w['name']} (ID: {w['id']}) - {tables_str}",
+                callback_data=f"edit_waiter_name_{w['id']}"
+            )
+        ])
     
-    await message.answer(text, parse_mode="Markdown", reply_markup=get_admin_management_keyboard())
+    # Добавляем кнопку "Назад"
+    keyboard_buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_admin_menu")])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    
+    await message.answer(
+        f"**👥 Официанты на {today}:**\n\n"
+        f"Нажмите на имя официанта, чтобы изменить его имя:",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
 
 @dp.message(F.text == "📅 Сменить год")
 async def button_change_year(message: Message, state: FSMContext):
@@ -1063,6 +1120,7 @@ async def button_cancel(message: Message, state: FSMContext):
     pending_reservations.pop(user_id, None)
     pending_deletions.pop(user_id, None)
     pending_edits.pop(user_id, None)
+    pending_payments.pop(user_id, None)
     
     await message.answer(
         "❌ Действие отменено.",
@@ -1289,7 +1347,11 @@ async def process_search(message: Message, state: FSMContext):
             await message.answer(
                 format_reservation_for_display(r),
                 parse_mode="Markdown",
-                reply_markup=get_reservation_action_keyboard(r['id'])
+                reply_markup=get_reservation_action_keyboard(
+                    r['id'], 
+                    r.get('deposit', 0), 
+                    r.get('deposit_paid', 0)
+                )
             )
         
         if len(results) > 10:
@@ -1320,6 +1382,98 @@ async def process_year(message: Message, state: FSMContext):
             "Главное меню:",
             reply_markup=get_main_keyboard(message.from_user.id)
         )
+
+@dp.callback_query(lambda c: c.data.startswith('edit_waiter_name_'))
+async def process_edit_waiter_name(callback: CallbackQuery, state: FSMContext):
+    """Редактирование имени официанта"""
+    waiter_id = int(callback.data.replace('edit_waiter_name_', ''))
+    
+    # Получаем текущее имя
+    user = db.get_user(waiter_id)
+    current_name = user.get('first_name', 'Неизвестно') if user else 'Неизвестно'
+    
+    await state.update_data(edit_waiter_id=waiter_id)
+    
+    await callback.message.edit_text(
+        f"✏️ **Редактирование имени официанта**\n\n"
+        f"ID: {waiter_id}\n"
+        f"Текущее имя: {current_name}\n\n"
+        f"Введите новое имя для этого официанта:",
+        parse_mode="Markdown"
+    )
+    await state.set_state(ReservationStates.waiting_for_waiter_name)
+    await callback.answer()
+
+@dp.message(ReservationStates.waiting_for_waiter_name)
+async def process_waiter_new_name(message: Message, state: FSMContext):
+    """Обработка нового имени официанта"""
+    data = await state.get_data()
+    waiter_id = data.get('edit_waiter_id')
+    
+    if not waiter_id:
+        await message.answer("❌ Ошибка: данные не найдены")
+        await state.clear()
+        return
+    
+    new_name = message.text.strip()
+    
+    if not new_name or len(new_name) < 2:
+        await message.answer("❌ Имя должно содержать хотя бы 2 символа")
+        return
+    
+    # Обновляем имя в БД
+    with sqlite3.connect(db.db_name) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE users SET first_name = ? WHERE user_id = ?
+        ''', (new_name, waiter_id))
+        conn.commit()
+    
+    # Также обновляем в памяти, если есть
+    if waiter_id in users_db:
+        users_db[waiter_id]['first_name'] = new_name
+    
+    await message.answer(f"✅ Имя официанта (ID: {waiter_id}) изменено на: {new_name}")
+    
+    # Возвращаемся к списку официантов
+    await state.clear()
+    
+    # Показываем обновленный список
+    today = get_today_str()
+    waiters_with_tables = db.get_all_waiters_for_date(today)
+    all_waiters = db.get_all_users_with_waiter_role()
+    
+    if not all_waiters:
+        await message.answer("📭 Нет пользователей с ролью официанта.", reply_markup=get_admin_management_keyboard())
+        return
+    
+    text = f"**👥 Официанты на {today}:**\n\n"
+    for w in all_waiters:
+        has_tables = False
+        tables_str = "❌ не назначены"
+        
+        for wt in waiters_with_tables:
+            if wt['id'] == w['id']:
+                has_tables = True
+                tables_str = f"✅ {', '.join(wt['tables'])}"
+                break
+        
+        status = "🟢" if has_tables else "🔴"
+        text += f"{status} {w['name']} (ID: {w['id']})\n"
+        text += f"   Столы: {tables_str}\n\n"
+    
+    await message.answer(text, parse_mode="Markdown", reply_markup=get_admin_management_keyboard())
+
+@dp.callback_query(lambda c: c.data == "back_to_admin_menu")
+async def back_to_admin_menu(callback: CallbackQuery):
+    """Возврат в меню администратора"""
+    await callback.message.edit_text(
+        "**⚙️ Управление системой**\n\n"
+        "Выберите действие:",
+        parse_mode="Markdown",
+        reply_markup=get_admin_management_keyboard()
+    )
+    await callback.answer()
 
 # ========== ОБРАБОТЧИКИ ДЕЙСТВИЙ С БРОНЯМИ ==========
 
@@ -1393,11 +1547,107 @@ async def process_cancel_delete(callback: CallbackQuery):
             await callback.message.edit_text(
                 format_reservation_for_display(reservation),
                 parse_mode="Markdown",
-                reply_markup=get_reservation_action_keyboard(reservation_id)
+                reply_markup=get_reservation_action_keyboard(
+                    reservation_id, 
+                    reservation.get('deposit', 0), 
+                    reservation.get('deposit_paid', 0)
+                )
             )
         pending_deletions.pop(user_id, None)
     
     await callback.answer("❌ Удаление отменено")
+
+@dp.callback_query(lambda c: c.data.startswith('pay_deposit_'))
+async def process_pay_deposit(callback: CallbackQuery):
+    """Обработка нажатия на кнопку оплаты депозита"""
+    reservation_id = int(callback.data.replace('pay_deposit_', ''))
+    reservation = db.get_reservation_by_id(reservation_id)
+    
+    if not reservation:
+        await callback.answer("❌ Бронь не найдена")
+        await callback.message.delete()
+        return
+    
+    # Сохраняем ID для подтверждения
+    pending_payments[callback.from_user.id] = reservation_id
+    
+    await callback.message.edit_text(
+        f"💰 **Подтверждение оплаты депозита**\n\n"
+        f"{format_reservation_for_display(reservation)}\n\n"
+        f"❓ Вы уверены, что депозит оплачен?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, оплачен", callback_data="confirm_payment"),
+                InlineKeyboardButton(text="❌ Нет, отмена", callback_data="cancel_payment")
+            ]
+        ])
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "confirm_payment")
+async def process_confirm_payment(callback: CallbackQuery):
+    """Подтверждение оплаты депозита"""
+    user_id = callback.from_user.id
+    
+    if user_id not in pending_payments:
+        await callback.message.edit_text("❌ Ошибка: бронь не найдена")
+        return
+    
+    reservation_id = pending_payments[user_id]
+    reservation = db.get_reservation_by_id(reservation_id)
+    
+    if not reservation:
+        await callback.message.edit_text("❌ Бронь не найдена")
+        pending_payments.pop(user_id, None)
+        return
+    
+    # Обновляем статус депозита
+    update_data = {'deposit_paid': 1}
+    if db.update_reservation(reservation_id, update_data):
+        updated_reservation = db.get_reservation_by_id(reservation_id)
+        
+        await callback.message.edit_text(
+            f"✅ **Депозит отмечен как оплачен!**\n\n"
+            f"{format_reservation_for_display(updated_reservation)}",
+            parse_mode="Markdown"
+        )
+        
+        # Уведомление об оплате депозита
+        today = get_today_str()
+        if updated_reservation and updated_reservation.get('date') == today:
+            await notify_all_users(
+                f"💰 Депозит оплачен для брони #{reservation_id}\n"
+                f"{updated_reservation.get('time')} | {updated_reservation.get('name')} | Стол {updated_reservation.get('table_number', '?')}",
+                exclude_ids=[user_id]
+            )
+    else:
+        await callback.message.edit_text("❌ Ошибка при обновлении статуса депозита")
+    
+    pending_payments.pop(user_id, None)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "cancel_payment")
+async def process_cancel_payment(callback: CallbackQuery):
+    """Отмена оплаты депозита"""
+    user_id = callback.from_user.id
+    if user_id in pending_payments:
+        reservation_id = pending_payments[user_id]
+        reservation = db.get_reservation_by_id(reservation_id)
+        
+        if reservation:
+            await callback.message.edit_text(
+                format_reservation_for_display(reservation),
+                parse_mode="Markdown",
+                reply_markup=get_reservation_action_keyboard(
+                    reservation_id, 
+                    reservation.get('deposit', 0), 
+                    reservation.get('deposit_paid', 0)
+                )
+            )
+        pending_payments.pop(user_id, None)
+    
+    await callback.answer("❌ Операция отменена")
 
 @dp.callback_query(lambda c: c.data.startswith('edit_'))
 async def process_edit_callback(callback: CallbackQuery):
@@ -1450,6 +1700,7 @@ async def process_edit_field(callback: CallbackQuery, state: FSMContext):
         'table': reservation.get('table_number', ''),
         'guests': str(reservation.get('guests', '')),
         'deposit': str(reservation.get('deposit', '0')),
+        'deposit_paid': reservation.get('deposit_paid', 0),
         'occasion': reservation.get('occasion', '')
     }
     
@@ -1578,6 +1829,8 @@ async def process_edit_value(message: Message, state: FSMContext):
                 new_value = deposit
             else:
                 new_value = deposit
+                # Сбрасываем статус оплаты при изменении суммы депозита
+                await state.update_data(reset_deposit_paid=True)
         except ValueError:
             valid = False
             error_msg = "❌ Введите число или сокращение (например 5к, 10к, 20000)"
@@ -1593,6 +1846,8 @@ async def process_edit_value(message: Message, state: FSMContext):
     update_data = {field: new_value}
     if field == 'table':
         update_data['table_strict'] = data.get('table_strict', False)
+    elif field == 'deposit' and data.get('reset_deposit_paid'):
+        update_data['deposit_paid'] = 0  # Сбрасываем статус оплаты при изменении суммы
     
     if db.update_reservation(reservation_id, update_data):
         updated_reservation = db.get_reservation_by_id(reservation_id)
@@ -1630,7 +1885,11 @@ async def back_to_reservation(callback: CallbackQuery):
             await callback.message.edit_text(
                 format_reservation_for_display(reservation),
                 parse_mode="Markdown",
-                reply_markup=get_reservation_action_keyboard(reservation_id)
+                reply_markup=get_reservation_action_keyboard(
+                    reservation_id, 
+                    reservation.get('deposit', 0), 
+                    reservation.get('deposit_paid', 0)
+                )
             )
     await callback.answer()
 
@@ -1690,7 +1949,7 @@ async def process_table_change(message: Message, state: FSMContext):
         if parsed['occasion']:
             reservation_text += f"🎉 Повод: {parsed['occasion']}\n"
         if parsed['deposit'] > 0:
-            reservation_text += f"💰 Депозит: {parsed['deposit']}₽\n"
+            reservation_text += f"💰 Депозит: {parsed['deposit']}₽ ❌ НЕ ОПЛАЧЕН\n"
         
         await message.answer(reservation_text, parse_mode="Markdown")
         
@@ -1701,7 +1960,7 @@ async def process_table_change(message: Message, state: FSMContext):
             # Сохраняем в Excel
             try:
                 today_reservations = db.get_today_reservations()
-                filepath = ExcelGenerator.create_reservation_file(today_reservations, today)
+                filepath = ExcelGenerator.create_reservation_file(today_reservations, today, db)
                 db.save_excel_file(f"reservations_{today}.xlsx", today, filepath)
             except Exception as e:
                 print(f"❌ Ошибка сохранения Excel: {e}")
@@ -1796,7 +2055,7 @@ async def process_any_text(message: Message, state: FSMContext):
     if parsed['occasion']:
         reservation_text += f"🎉 Повод: {parsed['occasion']}\n"
     if parsed['deposit'] > 0:
-        reservation_text += f"💰 Депозит: {parsed['deposit']}₽\n"
+        reservation_text += f"💰 Депозит: {parsed['deposit']}₽ ❌ НЕ ОПЛАЧЕН\n"
     
     await message.answer(reservation_text, parse_mode="Markdown")
     
@@ -1807,7 +2066,7 @@ async def process_any_text(message: Message, state: FSMContext):
         # Сохраняем в Excel
         try:
             today_reservations = db.get_today_reservations()
-            filepath = ExcelGenerator.create_reservation_file(today_reservations, today)
+            filepath = ExcelGenerator.create_reservation_file(today_reservations, today, db)
             db.save_excel_file(f"reservations_{today}.xlsx", today, filepath)
             print(f"📊 Excel файл сохранен: {filepath}")
         except Exception as e:
@@ -1913,16 +2172,23 @@ async def send_30min_notifications():
             if db.check_notification_sent(res['id'], waiter_id, '30min'):
                 continue
             
+            deposit_status = ""
+            if res.get('deposit', 0) > 0:
+                if res.get('deposit_paid', 0) == 1:
+                    deposit_status = "✅ Оплачен"
+                else:
+                    deposit_status = "❌ Не оплачен"
+            
             text = (
                 f"⏰ **Напоминание: через 30 минут**\n\n"
                 f"🪑 Стол {table}\n"
                 f"🕐 {res.get('time')} | 👤 {res.get('name')}\n"
-                f"👥 {res.get('guests')} чел.\n"
+                f"📞 {res.get('phone')} | 👥 {res.get('guests')} чел.\n"
             )
             if res.get('occasion'):
                 text += f"🎉 Повод: {res.get('occasion')}\n"
             if res.get('deposit', 0) > 0:
-                text += f"💰 Депозит: {res.get('deposit')}₽\n"
+                text += f"💰 Депозит: {res.get('deposit')}₽ {deposit_status}\n"
             
             try:
                 await bot.send_message(waiter_id, text, parse_mode="Markdown")
@@ -1972,7 +2238,7 @@ async def send_deposit_notifications():
     today = get_today_str()
     
     for res in past:
-        if res.get('deposit', 0) <= 0:
+        if res.get('deposit', 0) <= 0 or res.get('deposit_paid', 0) == 1:
             continue
         
         table = res.get('table_number')
@@ -1989,8 +2255,8 @@ async def send_deposit_notifications():
                 f"💰 **Напоминание о депозите**\n\n"
                 f"🪑 Стол {table}\n"
                 f"👤 {res.get('name')}\n"
-                f"💰 Сумма: {res.get('deposit')}₽\n\n"
-                f"Полтора часа назад была бронь, не забудьте про депозит!"
+                f"💰 Сумма: {res.get('deposit')}₽ (не оплачен)\n\n"
+                f"Полтора часа назад была бронь, не забудьте принять депозит!"
             )
             
             try:
@@ -2016,13 +2282,20 @@ async def send_morning_report():
             if r.get('table_strict'):
                 table_text += " (выбор гостя)"
             
+            deposit_status = ""
+            if r.get('deposit', 0) > 0:
+                if r.get('deposit_paid', 0) == 1:
+                    deposit_status = " ✅ Оплачен"
+                else:
+                    deposit_status = " ❌ Не оплачен"
+            
             text += (
                 f"🕐 {r.get('time')} | 👤 {r.get('name')}\n"
                 f"📞 {r.get('phone')} | 👥 {r.get('guests')} чел.\n"
                 f"🪑 Стол: {table_text}\n"
             )
             if r.get('deposit', 0) > 0:
-                text += f"💰 Депозит: {r.get('deposit')}₽\n"
+                text += f"💰 Депозит: {r.get('deposit')}₽{deposit_status}\n"
             if r.get('occasion'):
                 text += f"🎉 {r.get('occasion')}\n"
             text += "-----------------\n"

@@ -69,7 +69,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     reservation_id INTEGER NOT NULL,
                     waiter_id INTEGER NOT NULL,
-                    type TEXT NOT NULL,  -- '30min', 'birthday', 'deposit'
+                    type TEXT NOT NULL,
                     sent_at TEXT NOT NULL,
                     FOREIGN KEY (reservation_id) REFERENCES reservations(id)
                 )
@@ -338,6 +338,37 @@ class Database:
                 if table_number in tables:
                     waiters.append(row[0])
             return waiters
+    
+    def get_waiters_for_table_on_date_with_names(self, table_number: str, date: str = None) -> list:
+        """
+        Получение имен всех официантов, обслуживающих стол в конкретную дату
+        Возвращает список имен официантов
+        """
+        if date is None:
+            tz = pytz.timezone("Asia/Yekaterinburg")
+            date = datetime.now(tz).strftime("%Y-%m-%d")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_id, name, tables FROM waiters 
+                WHERE date = ?
+            ''', (date,))
+            rows = cursor.fetchall()
+            
+            waiter_names = []
+            for row in rows:
+                tables = json.loads(row[2])
+                if table_number in tables:
+                    # Получаем имя из таблицы users для единообразия
+                    cursor.execute('SELECT first_name FROM users WHERE user_id = ?', (row[0],))
+                    user_row = cursor.fetchone()
+                    if user_row and user_row[0]:
+                        waiter_names.append(user_row[0])
+                    else:
+                        waiter_names.append(row[1])
+            
+            return waiter_names
     
     def get_all_waiters_for_date(self, date: str = None) -> list:
         """Получение всех официантов на конкретную дату"""
