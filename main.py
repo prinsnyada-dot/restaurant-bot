@@ -1044,12 +1044,27 @@ async def process_new_admin_id(message: Message, state: FSMContext):
         else:
             new_user_id = int(text)
         
-        if new_user_id not in users_db:
+                # Проверяем сначала в БД, потом в users_db
+        user_in_db = db.get_user(new_user_id)
+        user_in_memory = new_user_id in users_db
+        
+        if not user_in_db and not user_in_memory:
             await message.answer(
                 f"❌ Пользователь с ID {new_user_id} еще не запускал бота.\n"
                 f"Сначала он должен написать /start боту."
             )
             return
+        
+        # Если пользователь есть в БД, но нет в памяти - добавляем в память
+        if user_in_db and not user_in_memory:
+            users_db[new_user_id] = {
+                'username': user_in_db.get('username', ''),
+                'first_name': user_in_db.get('first_name', f'User {new_user_id}'),
+                'is_admin': user_in_db.get('is_admin', 0),
+                'is_waiter': user_in_db.get('is_waiter', 0),
+                'created_at': user_in_db.get('created_at', datetime.now().isoformat())
+            }
+            print(f"✅ Пользователь {new_user_id} восстановлен из БД в память")
         
         if adding_role == 'admin':
             if add_admin(new_user_id):
