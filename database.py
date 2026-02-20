@@ -1,25 +1,151 @@
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
+import os
 
 class Database:
     def __init__(self, db_name="restaurant.db"):
         self.db_name = db_name
         self.init_db()
+        # При запуске проверяем и удаляем старые брони
+        self.cleanup_old_reservations()
     
     def init_db(self):
-        """Создание таблицы при первом запуске"""
+        """Создание таблиц при первом запуске"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
+            
+            # Таблица с бронями
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS reservations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     data TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    date TEXT NOT NULL  -- Добавляем отдельное поле даты для быстрого поиска
                 )
             ''')
+            
+            # Индекс для быстрого поиска по дате
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_reservations_date 
+                ON reservations(date)
+            ''')
+            
+            # Таблица для официантов и их столов (с датой)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS waiters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    tables TEXT NOT NULL,  -- JSON список столов
+                    date TEXT NOT NULL,     -- Дата, на которую назначены столы
+                    created_at TEXT NOT NULL,
+                    UNIQUE(user_id, date)   -- Один официант - одна запись на день
+                )
+            ''')
+            
+            # Индекс для быстрого поиска по дате
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_waiters_date 
+                ON waiters(date)
+            ''')
+            
+            # Таблица для отслеживания отправленных уведомлений
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    reservation_id INTEGER NOT NULL,
+                    waiter_id INTEGER NOT NULL,
+                    type TEXT NOT NULL,  -- '30min', 'birthday', 'deposit'
+                    sent_at TEXT NOT NULL,
+                    FOREIGN KEY (reservation_id) REFERENCES reservations(id)
+                )
+            ''')
+            
+            # Таблица для хранения Excel файлов
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS excel_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    filepath TEXT NOT NULL
+                )
+            ''')
+            
             conn.commit()
+    
+    def cleanup_old_reservations(self):
+        """Удаление броней старше 2 месяцев"""
+        try:
+            with sqlite3.connect(self.db_name) as conn:
+                cursor = conn.cursor()
+                
+                # Вычисляем дату 2 месяца назад
+                two_months_ago = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+                
+                # Получаем список удаляемых броней для лога
+                cursor.execute('''
+                    SELECT id, data FROM reservations 
+                    WHERE date < ?
+                ''', (two_months_ago,))
+                
+                old_reservations = cursor.fetchall()
+                
+                if old_reservations:
+                    print(f"🧹 Найдено {len(old_reservations)} броней старше 2 месяцев")
+                    
+                    # Удаляем связанные уведомления
+                    for res in old_reservations:
+                        cursor.execute('''
+                            DELETE FROM notifications WHERE reservation_id = ?
+                        ''', (res[0],))
+                    
+                    # Удаляем старые брони
+                    cursor.execute('''
+                        DELETE FROM reservations WHERE date < ?
+                    ''', (two_months_ago,))
+                    
+                    conn.commit()
+                    print(f"✅ Удалено {len(old_reservations)} старых броней")
+                    
+        except Exception as e:
+            print(f"❌ Ошибка при удалении старых броней: {e}")
+    
+    def cleanup_old_excel_files(self):
+        """Удаление старых Excel файлов (старше 2 месяцев)"""
+        try:
+            with sqlite3.connect(self.db_name) as conn:
+                cursor = conn.cursor()
+                
+                two_months_ago = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+                
+                # Получаем список старых файлов
+                cursor.execute('''
+                    SELECT filepath FROM excel_files WHERE date < ?
+                ''', (two_months_ago,))
+                
+                old_files = cursor.fetchall()
+                
+                # Удаляем физические файлы
+                for file in old_files:
+                    filepath = file[0]
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                        print(f"🗑 Удален старый Excel файл: {filepath}")
+                
+                # Удаляем записи из БД
+                cursor.execute('''
+                    DELETE FROM excel_files WHERE date < ?
+                ''', (two_months_ago,))
+                
+                conn.commit()
+                
+        except Exception as e:
+            print(f"❌ Ошибка при удалении старых Excel файлов: {e}")
+    
+    # ====== МЕТОДЫ ДЛЯ БРОНЕЙ ======
     
     def add_reservation(self, reservation_data):
         """Добавление брони"""
@@ -27,9 +153,11 @@ class Database:
             cursor = conn.cursor()
             created_at = datetime.now().isoformat()
             data_json = json.dumps(reservation_data, ensure_ascii=False)
+            date = reservation_data.get('date', '')
+            
             cursor.execute(
-                'INSERT INTO reservations (data, created_at) VALUES (?, ?)',
-                (data_json, created_at)
+                'INSERT INTO reservations (data, created_at, date) VALUES (?, ?, ?)',
+                (data_json, created_at, date)
             )
             conn.commit()
             return cursor.lastrowid
@@ -38,7 +166,7 @@ class Database:
         """Получение всех броней"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT id, data, created_at FROM reservations ORDER BY id')
+            cursor.execute('SELECT id, data, created_at FROM reservations ORDER BY date DESC, id DESC')
             rows = cursor.fetchall()
             
             reservations = []
@@ -56,18 +184,14 @@ class Database:
         
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT id, data FROM reservations')
+            cursor.execute('SELECT id, data FROM reservations WHERE date = ?', (today,))
             rows = cursor.fetchall()
             
             today_reservations = []
             for row in rows:
                 res_data = json.loads(row[1])
                 res_data['id'] = row[0]
-                
-                print(f"  Проверка брони #{row[0]}: дата в базе = {res_data.get('date')}")
-                
-                if res_data.get('date') == today:
-                    today_reservations.append(res_data)
+                today_reservations.append(res_data)
             
             print(f"✅ Найдено броней на сегодня: {len(today_reservations)}")
             return today_reservations
@@ -76,15 +200,14 @@ class Database:
         """Получение броней по конкретной дате"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT id, data FROM reservations')
+            cursor.execute('SELECT id, data FROM reservations WHERE date = ? ORDER BY data->>"$.time"', (date,))
             rows = cursor.fetchall()
             
             date_reservations = []
             for row in rows:
                 res_data = json.loads(row[1])
-                if res_data.get('date') == date:
-                    res_data['id'] = row[0]
-                    date_reservations.append(res_data)
+                res_data['id'] = row[0]
+                date_reservations.append(res_data)
             
             return date_reservations
     
@@ -115,15 +238,12 @@ class Database:
     
     def update_reservation(self, reservation_id, updated_data):
         """Обновление брони"""
-        # Получаем текущие данные
         current = self.get_reservation_by_id(reservation_id)
         if not current:
             return False
         
-        # Обновляем поля
         current.update(updated_data)
         
-        # Сохраняем в базу
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             save_data = current.copy()
@@ -142,9 +262,208 @@ class Database:
         """Удаление брони"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
+            # Удаляем связанные уведомления
+            cursor.execute('DELETE FROM notifications WHERE reservation_id = ?', (reservation_id,))
+            # Удаляем саму бронь
             cursor.execute('DELETE FROM reservations WHERE id = ?', (reservation_id,))
             conn.commit()
             return cursor.rowcount > 0
+    
+    # ====== МЕТОДЫ ДЛЯ ОФИЦИАНТОВ (С ДАТАМИ) ======
+    
+    def set_waiter_tables_for_date(self, user_id: int, name: str, tables: list, date: str = None):
+        """Установка столов для официанта на конкретную дату"""
+        if date is None:
+            tz = pytz.timezone("Asia/Yekaterinburg")
+            date = datetime.now(tz).strftime("%Y-%m-%d")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            created_at = datetime.now().isoformat()
+            tables_json = json.dumps(tables, ensure_ascii=False)
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO waiters (user_id, name, tables, date, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, name, tables_json, date, created_at))
+            conn.commit()
+            print(f"👤 Официант {user_id} назначен на столы {tables} на дату {date}")
+    
+    def get_waiter_tables_for_date(self, user_id: int, date: str = None) -> list:
+        """Получение списка столов официанта на конкретную дату"""
+        if date is None:
+            tz = pytz.timezone("Asia/Yekaterinburg")
+            date = datetime.now(tz).strftime("%Y-%m-%d")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT tables FROM waiters 
+                WHERE user_id = ? AND date = ?
+            ''', (user_id, date))
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row[0])
+            return []
+    
+    def get_waiters_for_table_on_date(self, table_number: str, date: str = None) -> list:
+        """Получение всех официантов, обслуживающих стол в конкретную дату"""
+        if date is None:
+            tz = pytz.timezone("Asia/Yekaterinburg")
+            date = datetime.now(tz).strftime("%Y-%m-%d")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_id, tables FROM waiters 
+                WHERE date = ?
+            ''', (date,))
+            rows = cursor.fetchall()
+            
+            waiters = []
+            for row in rows:
+                tables = json.loads(row[1])
+                if table_number in tables:
+                    waiters.append(row[0])
+            return waiters
+    
+    def get_all_waiters_for_date(self, date: str = None) -> list:
+        """Получение всех официантов на конкретную дату"""
+        if date is None:
+            tz = pytz.timezone("Asia/Yekaterinburg")
+            date = datetime.now(tz).strftime("%Y-%m-%d")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_id, name, tables FROM waiters 
+                WHERE date = ?
+                ORDER BY name
+            ''', (date,))
+            rows = cursor.fetchall()
+            
+            waiters = []
+            for row in rows:
+                waiters.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'tables': json.loads(row[2])
+                })
+            return waiters
+    
+    def remove_waiter_for_date(self, user_id: int, date: str = None):
+        """Удаление официанта на конкретную дату"""
+        if date is None:
+            tz = pytz.timezone("Asia/Yekaterinburg")
+            date = datetime.now(tz).strftime("%Y-%m-%d")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM waiters WHERE user_id = ? AND date = ?
+            ''', (user_id, date))
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    # ====== МЕТОДЫ ДЛЯ УВЕДОМЛЕНИЙ ======
+    
+    def save_notification(self, reservation_id: int, waiter_id: int, notif_type: str):
+        """Сохранение информации об отправленном уведомлении"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            sent_at = datetime.now().isoformat()
+            
+            cursor.execute('''
+                INSERT INTO notifications (reservation_id, waiter_id, type, sent_at)
+                VALUES (?, ?, ?, ?)
+            ''', (reservation_id, waiter_id, notif_type, sent_at))
+            conn.commit()
+    
+    def check_notification_sent(self, reservation_id: int, waiter_id: int, notif_type: str) -> bool:
+        """Проверка, отправлялось ли уже такое уведомление"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id FROM notifications 
+                WHERE reservation_id = ? AND waiter_id = ? AND type = ?
+            ''', (reservation_id, waiter_id, notif_type))
+            return cursor.fetchone() is not None
+    
+    def get_upcoming_reservations(self, minutes: int = 30) -> list:
+        """Получение броней, которые наступят через указанное количество минут"""
+        tz = pytz.timezone("Asia/Yekaterinburg")
+        now = datetime.now(tz)
+        target_time = now + timedelta(minutes=minutes)
+        
+        target_date = target_time.strftime("%Y-%m-%d")
+        target_time_str = target_time.strftime("%H:%M")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, data FROM reservations 
+                WHERE date = ? AND data LIKE ?
+            ''', (target_date, f'%"time": "{target_time_str}"%'))
+            
+            rows = cursor.fetchall()
+            upcoming = []
+            for row in rows:
+                res_data = json.loads(row[1])
+                res_data['id'] = row[0]
+                upcoming.append(res_data)
+            
+            return upcoming
+    
+    def get_past_reservations(self, hours: float) -> list:
+        """Получение броней, которые были указанное количество часов назад"""
+        tz = pytz.timezone("Asia/Yekaterinburg")
+        now = datetime.now(tz)
+        past_time = now - timedelta(hours=hours)
+        
+        past_date = past_time.strftime("%Y-%m-%d")
+        past_time_str = past_time.strftime("%H:%M")
+        
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, data FROM reservations 
+                WHERE date = ? AND data LIKE ?
+            ''', (past_date, f'%"time": "{past_time_str}"%'))
+            
+            rows = cursor.fetchall()
+            past = []
+            for row in rows:
+                res_data = json.loads(row[1])
+                res_data['id'] = row[0]
+                past.append(res_data)
+            
+            return past
+    
+    # ====== МЕТОДЫ ДЛЯ EXCEL ФАЙЛОВ ======
+    
+    def save_excel_file(self, filename: str, date: str, filepath: str):
+        """Сохранение информации об Excel файле"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            created_at = datetime.now().isoformat()
+            
+            cursor.execute('''
+                INSERT INTO excel_files (filename, date, created_at, filepath)
+                VALUES (?, ?, ?, ?)
+            ''', (filename, date, created_at, filepath))
+            conn.commit()
+    
+    def get_excel_files_by_date(self, date: str) -> list:
+        """Получение всех Excel файлов за дату"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT filename, filepath, created_at FROM excel_files 
+                WHERE date = ?
+                ORDER BY created_at DESC
+            ''', (date,))
+            
+            return cursor.fetchall()
 
 # Создаем глобальный экземпляр базы данных
 db = Database()
