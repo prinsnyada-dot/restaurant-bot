@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import os
 import sys
 import traceback
 from datetime import datetime, timedelta
@@ -18,6 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web  # <--- ЭТО НОВАЯ СТРОКА
 
 from database import db
 from excel_helper import ExcelGenerator
@@ -1990,9 +1992,47 @@ async def main():
     print("🚀 Бот запускается...")
     await dp.start_polling(bot)
 
+# ========== ЗАПУСК С ВЕБ-СЕРВЕРОМ ==========
+from aiohttp import web
+import threading
+import asyncio
+
+# Простой обработчик для проверки работы
+async def healthcheck(request):
+    return web.Response(text="✅ Бот работает!", status=200)
+
+async def run_web_server():
+    """Запуск веб-сервера для проверки"""
+    app = web.Application()
+    app.router.add_get('/', healthcheck)
+    app.router.add_get('/health', healthcheck)
+    
+    # Запускаем на всех интерфейсах, порт 10000
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    print("✅ Веб-сервер для проверки запущен на порту 10000")
+    print(f"🌐 URL: https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}")
+    
+    # Бесконечное ожидание
+    await asyncio.Event().wait()
+
+async def main_with_web():
+    """Запуск и бота, и веб-сервера"""
+    # Запускаем веб-сервер в фоне
+    web_task = asyncio.create_task(run_web_server())
+    
+    # Запускаем бота
+    await main()
+
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        import os
+        print("🚀 Запуск бота с веб-сервером...")
+        asyncio.run(main_with_web())
+    except KeyboardInterrupt:
+        print("👋 Бот остановлен пользователем")
     except Exception as e:
         print(f"❌ Критическая ошибка: {e}")
         traceback.print_exc()
