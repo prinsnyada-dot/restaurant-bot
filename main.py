@@ -29,8 +29,8 @@ logging.basicConfig(
 )
 
 # ========== НАСТРОЙКИ ==========
-BOT_TOKEN = "7958632916:AAH71NHLmUuL7ksHqUCsX4P6F1E0ixkIdTE"  # Замени на свой токен
-MAIN_ADMIN_ID = 123456789  # Замени на свой ID
+BOT_TOKEN = "8593813736:AAF0fftkjPXNz2aHVSFzQYGJ0cs7Xxw3PbY"  # Замени на свой токен
+MAIN_ADMIN_ID = 429549022  # Замени на свой ID
 TIMEZONE = "Asia/Yekaterinburg"
 CURRENT_YEAR = 2026
 MORNING_REPORT_HOUR = 11
