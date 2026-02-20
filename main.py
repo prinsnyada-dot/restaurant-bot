@@ -36,7 +36,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ Ошибка: BOT_TOKEN не установлен в переменных окружения!")
 
-MAIN_ADMIN_ID = 123456789  # Замени на свой ID
+MAIN_ADMIN_ID = 429549022  # Замени на свой ID
 TIMEZONE = "Asia/Yekaterinburg"
 CURRENT_YEAR = 2026
 MORNING_REPORT_HOUR = 11
