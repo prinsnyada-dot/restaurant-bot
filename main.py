@@ -295,17 +295,30 @@ def parse_reservation_text(text: str, year: int = None) -> dict:
                 original_text = original_text.replace(guests_match.group(0), '')
                 break
     
-    # ========== 6. Ищем ДЕПОЗИТ ==========
+       # ========== 6. Ищем ДЕПОЗИТ ==========
     deposit_patterns = [
-        r'(?:депозит|деп|задаток|предоплата)\s*(\d+)',
-        r'(\d{5,})',
+        r'(?:депозит|деп|задаток|предоплата)\s*(\d+)\s*(?:к|к\.|тыс)?',
+        r'(?:депозит|деп|задаток|предоплата)\s*(\d+)\s*(?:руб|р|₽|рублей)?',
+        r'(\d+)\s*к(?!\w)',  # числа вида "5к", "10к"
+        r'(\d+)\s*(?:тыс|тысяч)',  # числа вида "5 тыс"
+        r'(\d{5,})',  # числа от 10000 и выше
         r'(\d{4,})\s*(?:руб|р|₽|рублей)',
     ]
     
     for pattern in deposit_patterns:
         deposit_match = re.search(pattern, original_text, re.IGNORECASE)
         if deposit_match:
-            deposit = int(deposit_match.group(1))
+            # Берем первую группу (число)
+            deposit_num = int(deposit_match.group(1))
+            
+            # Проверяем, есть ли в найденном тексте буква "к" или "тыс"
+            matched_text = deposit_match.group(0).lower()
+            if 'к' in matched_text or 'тыс' in matched_text:
+                deposit = deposit_num * 1000
+            else:
+                deposit = deposit_num
+            
+            # Депозитом считаем только суммы от 1000
             if deposit >= 1000:
                 result['deposit'] = deposit
                 original_text = original_text.replace(deposit_match.group(0), '')
@@ -1150,15 +1163,31 @@ async def process_edit_value(message: Message, state: FSMContext):
     
     elif field == 'deposit':
         try:
-            deposit = int(new_value)
+            # Проверяем, есть ли сокращение с "к"
+            if 'к' in new_value.lower():
+                # Убираем все кроме цифр и умножаем на 1000
+                num_part = re.sub(r'[^\d]', '', new_value)
+                if num_part:
+                    deposit = int(num_part) * 1000
+                    await message.answer(f"💰 Преобразовано: {num_part}к = {deposit}₽")
+                else:
+                    deposit = 0
+            else:
+                # Обычное число
+                deposit = int(new_value)
+            
             if deposit < 0:
                 valid = False
                 error_msg = "❌ Депозит не может быть отрицательным"
+            elif deposit < 1000 and deposit > 0:
+                # Предупреждение о маленьком депозите
+                await message.answer(f"⚠️ Внимание: депозит {deposit}₽ меньше 1000₽. Продолжаем...")
+                new_value = deposit
             else:
                 new_value = deposit
         except ValueError:
             valid = False
-            error_msg = "❌ Введите число"
+            error_msg = "❌ Введите число или сокращение (например 5к, 10к, 20000)"
     
     elif field == 'occasion':
         if new_value.lower() == 'нет':
