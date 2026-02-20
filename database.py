@@ -32,7 +32,7 @@ class Database:
                 ON reservations(date)
             ''')
             
-            # ТАБЛИЦА ДЛЯ ПОЛЬЗОВАТЕЛЕЙ (НОВАЯ)
+            # ТАБЛИЦА ДЛЯ ПОЛЬЗОВАТЕЛЕЙ
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -69,7 +69,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     reservation_id INTEGER NOT NULL,
                     waiter_id INTEGER NOT NULL,
-                    type TEXT NOT NULL,
+                    type TEXT NOT NULL,  -- '30min', 'birthday', 'deposit'
                     sent_at TEXT NOT NULL,
                     FOREIGN KEY (reservation_id) REFERENCES reservations(id)
                 )
@@ -459,10 +459,24 @@ class Database:
             cursor = conn.cursor()
             created_at = datetime.now().isoformat()
             
-            cursor.execute('''
-                INSERT OR REPLACE INTO users (user_id, username, first_name, is_admin, is_waiter, created_at)
-                VALUES (?, ?, ?, ?, COALESCE((SELECT is_waiter FROM users WHERE user_id = ?), 0), ?)
-            ''', (user_id, username, first_name, is_admin, user_id, created_at))
+            # Проверяем, существует ли пользователь
+            cursor.execute('SELECT is_waiter FROM users WHERE user_id = ?', (user_id,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Обновляем существующего пользователя
+                cursor.execute('''
+                    UPDATE users 
+                    SET username = ?, first_name = ?, is_admin = ?, created_at = ?
+                    WHERE user_id = ?
+                ''', (username, first_name, is_admin, created_at, user_id))
+            else:
+                # Добавляем нового пользователя
+                cursor.execute('''
+                    INSERT INTO users (user_id, username, first_name, is_admin, is_waiter, created_at)
+                    VALUES (?, ?, ?, ?, 0, ?)
+                ''', (user_id, username, first_name, is_admin, created_at))
+            
             conn.commit()
     
     def get_user(self, user_id: int) -> dict:
@@ -525,12 +539,34 @@ class Database:
             return admins
     
     def get_all_waiters(self) -> list:
-        """Получение всех официантов"""
+        """Получение всех официантов из таблицы users"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT user_id, first_name FROM users WHERE is_waiter = 1')
             rows = cursor.fetchall()
             return [{'id': row[0], 'name': row[1]} for row in rows]
+    
+    def get_all_users_with_waiter_role(self) -> list:
+        """
+        Получение всех пользователей с ролью официанта (даже если у них нет столов на сегодня)
+        Этот метод нужен для отображения в списке официантов
+        """
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT user_id, first_name FROM users 
+                WHERE is_waiter = 1
+                ORDER BY first_name
+            ''')
+            rows = cursor.fetchall()
+            
+            users = []
+            for row in rows:
+                users.append({
+                    'id': row[0],
+                    'name': row[1] if row[1] else f"Официант {row[0]}"
+                })
+            return users
     
     # ====== МЕТОДЫ ДЛЯ EXCEL ФАЙЛОВ ======
     

@@ -19,7 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from aiohttp import web  # <--- ЭТО НОВАЯ СТРОКА
+from aiohttp import web
 
 from database import db
 from excel_helper import ExcelGenerator
@@ -31,7 +31,10 @@ logging.basicConfig(
 )
 
 # ========== НАСТРОЙКИ ==========
-BOT_TOKEN = "8593813736:AAF0fftkjPXNz2aHVSFzQYGJ0cs7Xxw3PbY"  # Замени на свой токен
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("❌ Ошибка: BOT_TOKEN не установлен в переменных окружения!")
+
 MAIN_ADMIN_ID = 429549022  # Замени на свой ID
 TIMEZONE = "Asia/Yekaterinburg"
 CURRENT_YEAR = 2026
@@ -119,7 +122,7 @@ def get_today_str() -> str:
     print(f"📅 Сегодня по часовому поясу {TIMEZONE}: {today}")
     return today
 
-# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ (НОВЫЕ, С БД) ==========
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ (С БД) ==========
 
 def add_user(user_id: int, username: str, first_name: str, is_admin: int = 0):
     """Добавление пользователя в БД"""
@@ -127,10 +130,29 @@ def add_user(user_id: int, username: str, first_name: str, is_admin: int = 0):
 
 def is_admin(user_id: int) -> bool:
     """Проверка на администратора"""
+    # Сначала проверяем главного админа
     if user_id == MAIN_ADMIN_ID:
         return True
+    
+    # Проверяем в памяти
+    if user_id in users_db and users_db[user_id].get('is_admin', 0) == 1:
+        return True
+    
+    # Проверяем в БД
     user = db.get_user(user_id)
-    return user and user.get('is_admin', 0) == 1
+    if user and user.get('is_admin', 0) == 1:
+        # Синхронизируем с памятью
+        if user_id not in users_db:
+            users_db[user_id] = {
+                'username': user.get('username', ''),
+                'first_name': user.get('first_name', ''),
+                'is_admin': 1,
+                'is_waiter': user.get('is_waiter', 0),
+                'created_at': user.get('created_at', datetime.now().isoformat())
+            }
+        return True
+    
+    return False
 
 def is_main_admin(user_id: int) -> bool:
     """Проверка на главного администратора"""
@@ -138,8 +160,25 @@ def is_main_admin(user_id: int) -> bool:
 
 def is_waiter(user_id: int) -> bool:
     """Проверка, является ли пользователь официантом"""
+    # Проверяем в памяти
+    if user_id in users_db and users_db[user_id].get('is_waiter', 0) == 1:
+        return True
+    
+    # Проверяем в БД
     user = db.get_user(user_id)
-    return user and user.get('is_waiter', 0) == 1
+    if user and user.get('is_waiter', 0) == 1:
+        # Синхронизируем с памятью
+        if user_id not in users_db:
+            users_db[user_id] = {
+                'username': user.get('username', ''),
+                'first_name': user.get('first_name', ''),
+                'is_admin': user.get('is_admin', 0),
+                'is_waiter': 1,
+                'created_at': user.get('created_at', datetime.now().isoformat())
+            }
+        return True
+    
+    return False
 
 def add_admin(user_id: int) -> bool:
     """Добавление администратора"""
@@ -165,37 +204,7 @@ def get_all_users() -> List[int]:
 
 def get_all_admins() -> List[dict]:
     """Получение списка всех администраторов"""
-    return db.get_all_admins(MAIN_ADMIN_ID)    
-    if MAIN_ADMIN_ID in users_db:
-        admins.append({
-            'id': MAIN_ADMIN_ID,
-            'name': users_db[MAIN_ADMIN_ID].get('first_name', 'Главный админ'),
-            'is_main': True
-        })
-    
-    for user_id, user_data in users_db.items():
-        if user_data.get('is_admin') == 1 and user_id != MAIN_ADMIN_ID:
-            admins.append({
-                'id': user_id,
-                'name': user_data.get('first_name', 'Админ'),
-                'is_main': False
-            })
-    
-    return admins
-
-async def notify_all_users(text: str, exclude_ids: list = None) -> None:
-    """Отправка уведомлений всем"""
-    if exclude_ids is None:
-        exclude_ids = []
-    
-    for user_id in get_all_users():
-        if user_id in exclude_ids:
-            continue
-        if is_admin(user_id):
-            try:
-                await bot.send_message(user_id, text, parse_mode="Markdown")
-            except Exception as e:
-                logging.error(f"Не удалось отправить пользователю {user_id}: {e}")
+    return db.get_all_admins(MAIN_ADMIN_ID)
 
 # ========== КЛАВИАТУРЫ ==========
 
@@ -203,25 +212,34 @@ def get_main_keyboard(user_id: int = None):
     """Создает клавиатуру с основными кнопками"""
     buttons = []
     
-    if user_id and is_waiter(user_id):
-        buttons.append([KeyboardButton(text="📋 Мои брони")])
-        buttons.append([KeyboardButton(text="📊 Мои столы")])
+    if user_id:
+        # Проверяем права через БД
+        is_admin_user = is_admin(user_id)
+        is_waiter_user = is_waiter(user_id)
+        is_main_admin_user = is_main_admin(user_id)
+        
+        print(f"🔍 Клавиатура для user_id={user_id}: admin={is_admin_user}, waiter={is_waiter_user}, main={is_main_admin_user}")
+        
+        if is_waiter_user:
+            buttons.append([KeyboardButton(text="📋 Мои брони")])
+            buttons.append([KeyboardButton(text="📊 Мои столы")])
+        
+        if is_admin_user:
+            if is_waiter_user:
+                buttons.append([KeyboardButton(text="📋 Все брони")])
+            else:
+                buttons.append([KeyboardButton(text="📋 Сегодня")])
+            buttons.append([KeyboardButton(text="➕ Новая бронь")])
+            buttons.append([KeyboardButton(text="🔍 Поиск")])
+            buttons.append([KeyboardButton(text="📊 Excel")])
+        
+        if is_main_admin_user:
+            buttons.append([KeyboardButton(text="⚙️ Управление")])
     
-    if user_id and is_admin(user_id):
-        if is_waiter(user_id):
-            buttons.append([KeyboardButton(text="📋 Все брони")])
-        else:
-            buttons.append([KeyboardButton(text="📋 Сегодня")])
-        buttons.append([KeyboardButton(text="➕ Новая бронь")])
-        buttons.append([KeyboardButton(text="🔍 Поиск")])
-        buttons.append([KeyboardButton(text="📊 Excel")])
-    
-    if user_id and is_main_admin(user_id):
-        buttons.append([KeyboardButton(text="⚙️ Управление")])
-    
-    # Если кнопок нет, добавляем базовые
+    # Если кнопок нет, добавляем базовые для всех
     if not buttons:
         buttons.append([KeyboardButton(text="📋 Сегодня")])
+        buttons.append([KeyboardButton(text="➕ Новая бронь")])
     
     keyboard = ReplyKeyboardMarkup(
         keyboard=buttons,
@@ -644,40 +662,48 @@ async def cmd_start(message: Message):
     user = message.from_user
     is_admin_user = 1 if user.id == MAIN_ADMIN_ID else 0
     
-    add_user(user.id, user.username, user.first_name, is_admin_user)
+    # Сохраняем в БД
+    db.add_user(user.id, user.username, user.first_name, is_admin_user)
     
-    if is_admin_user or is_admin(user.id):
-        welcome_text = (
-            f"👋 Добро пожаловать, {user.first_name}!\n"
-            f"📅 Текущий год: **{current_year}**\n\n"
-        )
-        
-        if is_main_admin(user.id):
-            welcome_text += "⭐ **Вы главный администратор**\n"
-        elif is_admin(user.id):
-            welcome_text += "👑 **Вы администратор**\n"
-        
-        if is_waiter(user.id):
-            today = get_today_str()
-            tables = db.get_waiter_tables_for_date(user.id, today)
-            tables_str = ', '.join(tables) if tables else 'не назначены'
-            welcome_text += f"🍽 **Вы официант** (столы на сегодня: {tables_str})\n\n"
-        
-        welcome_text += "**Как работать:**\n"
-        welcome_text += "• Просто напишите данные брони - бот создаст её\n"
-        
-        await message.answer(
-            welcome_text,
-            parse_mode="Markdown",
-            reply_markup=get_main_keyboard(user.id)
-        )
+    # Загружаем из БД в память
+    user_from_db = db.get_user(user.id)
+    if user_from_db:
+        users_db[user.id] = {
+            'username': user_from_db.get('username', user.username),
+            'first_name': user_from_db.get('first_name', user.first_name),
+            'is_admin': user_from_db.get('is_admin', is_admin_user),
+            'is_waiter': user_from_db.get('is_waiter', 0),
+            'created_at': user_from_db.get('created_at', datetime.now().isoformat())
+        }
     else:
-        await message.answer(
-            "👋 Добро пожаловать!\n"
-            "Вы будете получать уведомления о бронях."
-        )
-
-# ========== ОБРАБОТЧИКИ КНОПОК ==========
+        # Если почему-то нет в БД, создаем запись
+        add_user(user.id, user.username, user.first_name, is_admin_user)
+    
+    # Проверяем, является ли пользователь официантом (уже назначенным)
+    waiter_tables = db.get_waiter_tables_for_date(user.id)
+    
+    welcome_text = f"👋 Добро пожаловать, {user.first_name}!\n"
+    welcome_text += f"📅 Текущий год: **{current_year}**\n\n"
+    
+    if is_main_admin(user.id):
+        welcome_text += "⭐ **Вы главный администратор**\n"
+    elif is_admin(user.id):
+        welcome_text += "👑 **Вы администратор**\n"
+    
+    if is_waiter(user.id):
+        tables_str = ', '.join(waiter_tables) if waiter_tables else 'не назначены'
+        welcome_text += f"🍽 **Вы официант** (столы на сегодня: {tables_str})\n"
+        if not waiter_tables:
+            welcome_text += "❗️ Назначьте столы в разделе '📊 Мои столы'\n"
+    
+    welcome_text += "\n**Как работать:**\n"
+    welcome_text += "• Просто напишите данные брони - бот создаст её\n"
+    
+    await message.answer(
+        welcome_text,
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard(user.id)
+    )
 
 @dp.message(F.text == "📋 Сегодня")
 async def button_today(message: Message):
@@ -932,15 +958,14 @@ async def button_remove_waiter(message: Message, state: FSMContext):
     today = get_today_str()
     waiters = db.get_all_waiters_for_date(today)
     
-    if not waiters:
-        await message.answer("❌ Нет официантов на сегодня.")
-        return
-    
     text = "**📋 Список официантов на сегодня:**\n\n"
     for w in waiters:
         text += f"🆔 {w['id']} | {w['name']} | Столы: {', '.join(w['tables'])}\n"
     
-    text += "\nВведите ID официанта для удаления:"
+    if not waiters:
+        text = "📭 Нет официантов с назначенными столами на сегодня.\n\n"
+    
+    text += "\nВведите ID официанта для удаления (или 0 для отмены):"
     
     await message.answer(text, parse_mode="Markdown", reply_markup=get_cancel_keyboard())
     await state.set_state(ReservationStates.waiting_for_admin_to_remove)
@@ -972,17 +997,37 @@ async def button_list_waiters(message: Message):
         return
     
     today = get_today_str()
-    waiters = db.get_all_waiters_for_date(today)
     
-    if not waiters:
-        await message.answer("📭 Нет официантов на сегодня.")
+    # Официанты с назначенными столами на сегодня
+    waiters_with_tables = db.get_all_waiters_for_date(today)
+    
+    # Все официанты с ролью
+    all_waiters = db.get_all_users_with_waiter_role() if hasattr(db, 'get_all_users_with_waiter_role') else []
+    
+    if not all_waiters:
+        # Если метод не добавлен, используем waiters_with_tables
+        all_waiters = [{'id': w['id'], 'name': w['name']} for w in waiters_with_tables]
+    
+    if not all_waiters:
+        await message.answer("📭 Нет пользователей с ролью официанта.")
         return
     
-    text = f"**👥 Список официантов на {today}:**\n\n"
-    for w in waiters:
-        tables_str = ', '.join(w['tables'])
-        text += f"👤 {w['name']} (ID: {w['id']})\n"
-        text += f"🪑 Столы: {tables_str}\n\n"
+    text = f"**👥 Официанты на {today}:**\n\n"
+    
+    for w in all_waiters:
+        # Проверяем, есть ли у этого официанта столы на сегодня
+        has_tables = False
+        tables_str = "❌ не назначены"
+        
+        for wt in waiters_with_tables:
+            if wt['id'] == w['id']:
+                has_tables = True
+                tables_str = f"✅ {', '.join(wt['tables'])}"
+                break
+        
+        status = "🟢" if has_tables else "🔴"
+        text += f"{status} {w['name']} (ID: {w['id']})\n"
+        text += f"   Столы: {tables_str}\n\n"
     
     await message.answer(text, parse_mode="Markdown", reply_markup=get_admin_management_keyboard())
 
@@ -1044,7 +1089,7 @@ async def process_new_admin_id(message: Message, state: FSMContext):
         else:
             new_user_id = int(text)
         
-                # Проверяем сначала в БД, потом в users_db
+        # Проверяем сначала в БД, потом в users_db
         user_in_db = db.get_user(new_user_id)
         user_in_memory = new_user_id in users_db
         
@@ -1068,11 +1113,17 @@ async def process_new_admin_id(message: Message, state: FSMContext):
         
         if adding_role == 'admin':
             if add_admin(new_user_id):
-                user_info = users_db[new_user_id]
+                # Получаем информацию о пользователе
+                user_info = users_db.get(new_user_id, {})
+                if not user_info and user_in_db:
+                    user_info = user_in_db
+                
+                name = user_info.get('first_name', 'Неизвестно')
+                
                 await message.answer(
                     f"✅ Администратор добавлен!\n"
                     f"ID: {new_user_id}\n"
-                    f"Имя: {user_info.get('first_name', 'Неизвестно')}",
+                    f"Имя: {name}",
                     reply_markup=get_admin_management_keyboard()
                 )
                 
@@ -1087,7 +1138,7 @@ async def process_new_admin_id(message: Message, state: FSMContext):
             else:
                 await message.answer("❌ Не удалось добавить администратора.")
         
-        elif adding_role == 'waiter':  # <--- ЭТА СТРОКА ДОЛЖНА БЫТЬ НА ОДНОМ УРОВНЕ С if
+        elif adding_role == 'waiter':
             if add_waiter_role(new_user_id):
                 user_info = db.get_user(new_user_id)
                 name = user_info.get('first_name', 'Неизвестно') if user_info else 'Неизвестно'
@@ -1096,7 +1147,12 @@ async def process_new_admin_id(message: Message, state: FSMContext):
                     await bot.send_message(
                         new_user_id,
                         "👏 **Вам назначена роль официанта!**\n\n"
-                        "Нажмите /start, затем выберите '📊 Мои столы' чтобы настроить, какие столы вы обслуживаете сегодня.",
+                        "❗️ **ВАЖНО:** Чтобы получать уведомления, вам нужно назначить свои столы.\n\n"
+                        "1. Нажмите /start\n"
+                        "2. Выберите кнопку **'📊 Мои столы'**\n"
+                        "3. Введите номера столов, которые вы обслуживаете сегодня\n"
+                        "   (например: `11,12,13` или `11-15`)\n\n"
+                        "Эту процедуру нужно повторять **каждый день**!",
                         parse_mode="Markdown"
                     )
                 except Exception as e:
@@ -1106,7 +1162,7 @@ async def process_new_admin_id(message: Message, state: FSMContext):
                     f"✅ Официант добавлен!\n"
                     f"ID: {new_user_id}\n"
                     f"Имя: {name}\n\n"
-                    f"Теперь этот пользователь должен настроить свои столы.",
+                    f"❗️ Теперь этот пользователь должен зайти в **'📊 Мои столы'** и назначить себе столы на сегодня.",
                     reply_markup=get_admin_management_keyboard()
                 )
             else:
@@ -1128,11 +1184,16 @@ async def process_remove_user_id(message: Message, state: FSMContext):
     try:
         user_id = int(message.text.strip())
         
+        if user_id == 0:
+            await message.answer("❌ Операция отменена.")
+            await state.clear()
+            return
+        
         if user_id == MAIN_ADMIN_ID:
             await message.answer("❌ Нельзя удалить главного администратора.")
             return
         
-        if user_id not in users_db:
+        if user_id not in users_db and not db.get_user(user_id):
             await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
             return
         
@@ -1214,28 +1275,6 @@ async def process_waiter_tables(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
-@dp.message(ReservationStates.waiting_for_year)
-async def process_year(message: Message, state: FSMContext):
-    """Обработка ввода года"""
-    global current_year
-    try:
-        year = int(message.text.strip())
-        if 2020 <= year <= 2030:
-            current_year = year
-            await message.answer(f"✅ Год установлен: {year}")
-        else:
-            await message.answer("❌ Год должен быть от 2020 до 2030")
-    except ValueError:
-        await message.answer("❌ Введите число (например, 2026)")
-    finally:
-        await state.clear()
-        await message.answer(
-            "Главное меню:",
-            reply_markup=get_main_keyboard(message.from_user.id)
-        )
-
-# ========== ОБРАБОТЧИКИ ПОИСКА ==========
-
 @dp.message(ReservationStates.waiting_for_search_delete)
 async def process_search(message: Message, state: FSMContext):
     """Обработка поиска"""
@@ -1261,6 +1300,26 @@ async def process_search(message: Message, state: FSMContext):
         reply_markup=get_main_keyboard(message.from_user.id)
     )
     await state.clear()
+
+@dp.message(ReservationStates.waiting_for_year)
+async def process_year(message: Message, state: FSMContext):
+    """Обработка ввода года"""
+    global current_year
+    try:
+        year = int(message.text.strip())
+        if 2020 <= year <= 2030:
+            current_year = year
+            await message.answer(f"✅ Год установлен: {year}")
+        else:
+            await message.answer("❌ Год должен быть от 2020 до 2030")
+    except ValueError:
+        await message.answer("❌ Введите число (например, 2026)")
+    finally:
+        await state.clear()
+        await message.answer(
+            "Главное меню:",
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
 
 # ========== ОБРАБОТЧИКИ ДЕЙСТВИЙ С БРОНЯМИ ==========
 
@@ -1560,8 +1619,6 @@ async def process_edit_value(message: Message, state: FSMContext):
         reply_markup=get_main_keyboard(message.from_user.id)
     )
 
-# ========== ОБРАБОТЧИКИ ДЛЯ ВОЗВРАТА ==========
-
 @dp.callback_query(lambda c: c.data == "back_to_reservation")
 async def back_to_reservation(callback: CallbackQuery):
     """Возврат к просмотру брони"""
@@ -1781,6 +1838,40 @@ async def cmd_set_year(message: Message):
     except ValueError:
         await message.answer("❌ Введите число")
 
+@dp.message(Command("myrole"))
+async def cmd_myrole(message: Message):
+    """Проверка своей роли"""
+    user_id = message.from_user.id
+    
+    # Проверяем в памяти
+    in_memory = user_id in users_db
+    memory_data = users_db.get(user_id, {})
+    
+    # Проверяем в БД
+    in_db = db.get_user(user_id)
+    
+    text = f"**🔍 Отладка ролей**\n\n"
+    text += f"User ID: {user_id}\n"
+    text += f"Main admin: {is_main_admin(user_id)}\n\n"
+    
+    text += f"**В памяти:**\n"
+    text += f"Есть в памяти: {in_memory}\n"
+    if in_memory:
+        text += f"is_admin: {memory_data.get('is_admin', 0)}\n"
+        text += f"is_waiter: {memory_data.get('is_waiter', 0)}\n"
+    
+    text += f"\n**В БД:**\n"
+    text += f"Есть в БД: {in_db is not None}\n"
+    if in_db:
+        text += f"is_admin: {in_db.get('is_admin', 0)}\n"
+        text += f"is_waiter: {in_db.get('is_waiter', 0)}\n"
+    
+    text += f"\n**Функции:**\n"
+    text += f"is_admin(): {is_admin(user_id)}\n"
+    text += f"is_waiter(): {is_waiter(user_id)}\n"
+    
+    await message.answer(text, parse_mode="Markdown")
+
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
     """Отладка - показать все брони"""
@@ -1861,11 +1952,11 @@ async def send_birthday_notifications():
                 continue
             
             text = (
-                f"🎂 **Напоминание: не забудь поздравить!**\n\n"
+                f"🎂 **Напоминание: не забудьте поздравить!**\n\n"
                 f"🪑 Стол {table}\n"
                 f"👤 {res.get('name')}\n"
                 f"🎉 Повод: {res.get('occasion')}\n\n"
-                f"Час назад пришла бронь, не забудь поздравить гостей!"
+                f"Час назад была бронь, пора поздравить гостей!"
             )
             
             try:
@@ -1899,7 +1990,7 @@ async def send_deposit_notifications():
                 f"🪑 Стол {table}\n"
                 f"👤 {res.get('name')}\n"
                 f"💰 Сумма: {res.get('deposit')}₽\n\n"
-                f"Полтора часа назад пришла бронь, не забудь про депозит!"
+                f"Полтора часа назад была бронь, не забудьте про депозит!"
             )
             
             try:
@@ -1938,9 +2029,54 @@ async def send_morning_report():
     
     await notify_all_users(text)
 
+# ========== ЗАПУСК С ВЕБ-СЕРВЕРОМ ==========
+
+# Простой обработчик для проверки работы
+async def healthcheck(request):
+    """Возвращает минимальный ответ для cron-job.org"""
+    return web.Response(text="OK", status=200)
+
+async def run_web_server():
+    """Запуск веб-сервера для проверки"""
+    app = web.Application()
+    
+    # Основной маршрут для проверки
+    app.router.add_get('/', healthcheck)
+    app.router.add_get('/health', healthcheck)
+    app.router.add_get('/ping', healthcheck)
+    
+    # Запускаем на всех интерфейсах, порт 10000
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    print("✅ Веб-сервер для проверки запущен на порту 10000")
+    
+    # Бесконечное ожидание
+    await asyncio.Event().wait()
+
+async def main_with_web():
+    """Запуск и бота, и веб-сервера"""
+    # Запускаем веб-сервер в фоне
+    web_task = asyncio.create_task(run_web_server())
+    
+    # Запускаем бота
+    await main()
+
+# ========== ОСНОВНАЯ ФУНКЦИЯ ==========
+async def main():
+    """Главная функция"""
+    dp.startup.register(on_startup)
+    print("🚀 Бот запускается...")
+    await dp.start_polling(bot)
+
 # ========== ЗАПУСК ==========
 async def on_startup():
     """Действия при запуске"""
+    # Очищаем вебхуки перед запуском
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("✅ Вебхук удален")
+    
     print("🧹 Запуск очистки старых данных...")
     db.cleanup_old_reservations()
     db.cleanup_old_excel_files()
@@ -1988,50 +2124,8 @@ async def on_startup():
     print(f"✅ Текущий год: {current_year}")
     print(f"✅ Автоочистка старых броней активирована")
 
-async def main():
-    """Главная функция"""
-    dp.startup.register(on_startup)
-    print("🚀 Бот запускается...")
-    await dp.start_polling(bot)
-
-# ========== ЗАПУСК С ВЕБ-СЕРВЕРОМ ==========
-from aiohttp import web
-import threading
-import asyncio
-
-# Простой обработчик для проверки работы
-async def healthcheck(request):
-    return web.Response(text="✅ Бот работает!", status=200)
-
-async def run_web_server():
-    """Запуск веб-сервера для проверки"""
-    app = web.Application()
-    app.router.add_get('/', healthcheck)
-    app.router.add_get('/health', healthcheck)
-    
-    # Запускаем на всех интерфейсах, порт 10000
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 10000)
-    await site.start()
-    print("✅ Веб-сервер для проверки запущен на порту 10000")
-    print(f"🌐 URL: https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'localhost')}")
-    
-    # Бесконечное ожидание
-    await asyncio.Event().wait()
-
-async def main_with_web():
-    """Запуск и бота, и веб-сервера"""
-    # Запускаем веб-сервер в фоне
-    web_task = asyncio.create_task(run_web_server())
-    
-    # Запускаем бота
-    await main()
-
 if __name__ == "__main__":
     try:
-        import os
-        print("🚀 Запуск бота с веб-сервером...")
         asyncio.run(main_with_web())
     except KeyboardInterrupt:
         print("👋 Бот остановлен пользователем")
