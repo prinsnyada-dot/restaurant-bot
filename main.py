@@ -119,13 +119,18 @@ def get_today_str() -> str:
     print(f"📅 Сегодня по часовому поясу {TIMEZONE}: {today}")
     return today
 
-# ========== ФУНКЦИИ ДЛЯ ПРОВЕРКИ РОЛЕЙ ==========
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ (НОВЫЕ, С БД) ==========
+
+def add_user(user_id: int, username: str, first_name: str, is_admin: int = 0):
+    """Добавление пользователя в БД"""
+    db.add_user(user_id, username, first_name, is_admin)
 
 def is_admin(user_id: int) -> bool:
     """Проверка на администратора"""
     if user_id == MAIN_ADMIN_ID:
         return True
-    return users_db.get(user_id, {}).get('is_admin', 0) == 1
+    user = db.get_user(user_id)
+    return user and user.get('is_admin', 0) == 1
 
 def is_main_admin(user_id: int) -> bool:
     """Проверка на главного администратора"""
@@ -133,56 +138,34 @@ def is_main_admin(user_id: int) -> bool:
 
 def is_waiter(user_id: int) -> bool:
     """Проверка, является ли пользователь официантом"""
-    if user_id in users_db:
-        return users_db[user_id].get('is_waiter', 0) == 1
-    return False
+    user = db.get_user(user_id)
+    return user and user.get('is_waiter', 0) == 1
 
 def add_admin(user_id: int) -> bool:
     """Добавление администратора"""
-    if user_id in users_db:
-        users_db[user_id]['is_admin'] = 1
-        return True
-    return False
+    return db.set_admin(user_id, True)
 
 def remove_admin(user_id: int) -> bool:
     """Удаление администратора"""
-    if user_id in users_db and user_id != MAIN_ADMIN_ID:
-        users_db[user_id]['is_admin'] = 0
-        return True
-    return False
+    if user_id == MAIN_ADMIN_ID:
+        return False
+    return db.set_admin(user_id, False)
 
 def add_waiter_role(user_id: int) -> bool:
     """Добавление роли официанта"""
-    if user_id in users_db:
-        users_db[user_id]['is_waiter'] = 1
-        return True
-    return False
+    return db.set_waiter(user_id, True)
 
 def remove_waiter_role(user_id: int) -> bool:
     """Удаление роли официанта"""
-    if user_id in users_db:
-        users_db[user_id]['is_waiter'] = 0
-        return True
-    return False
-
-def add_user(user_id: int, username: str, first_name: str, is_admin: int = 0) -> None:
-    """Добавление пользователя"""
-    users_db[user_id] = {
-        'username': username,
-        'first_name': first_name,
-        'is_admin': is_admin,
-        'is_waiter': 0,
-        'created_at': datetime.now().isoformat()
-    }
+    return db.set_waiter(user_id, False)
 
 def get_all_users() -> List[int]:
     """Получение всех пользователей"""
-    return list(users_db.keys())
+    return db.get_all_users()
 
 def get_all_admins() -> List[dict]:
     """Получение списка всех администраторов"""
-    admins = []
-    
+    return db.get_all_admins(MAIN_ADMIN_ID)    
     if MAIN_ADMIN_ID in users_db:
         admins.append({
             'id': MAIN_ADMIN_ID,
@@ -1089,26 +1072,30 @@ async def process_new_admin_id(message: Message, state: FSMContext):
             else:
                 await message.answer("❌ Не удалось добавить администратора.")
         
-        elif adding_role == 'waiter':
-            add_waiter_role(new_user_id)
-            user_info = users_db[new_user_id]
-            
-            try:
-                await bot.send_message(
-                    new_user_id,
-                    "🍽 Вам назначена роль официанта!\n"
-                    "Нажмите /start, затем выберите '📊 Мои столы' чтобы настроить, какие столы вы обслуживаете."
+               elif adding_role == 'waiter':
+            if add_waiter_role(new_user_id):
+                user_info = db.get_user(new_user_id)
+                name = user_info.get('first_name', 'Неизвестно') if user_info else 'Неизвестно'
+                
+                try:
+                    await bot.send_message(
+                        new_user_id,
+                        "👏 **Вам назначена роль официанта!**\n\n"
+                        "Нажмите /start, затем выберите '📊 Мои столы' чтобы настроить, какие столы вы обслуживаете сегодня.",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    print(f"Не удалось отправить уведомление официанту {new_user_id}: {e}")
+                
+                await message.answer(
+                    f"✅ Официант добавлен!\n"
+                    f"ID: {new_user_id}\n"
+                    f"Имя: {name}\n\n"
+                    f"Теперь этот пользователь должен настроить свои столы.",
+                    reply_markup=get_admin_management_keyboard()
                 )
-            except:
-                pass
-            
-            await message.answer(
-                f"✅ Официант добавлен!\n"
-                f"ID: {new_user_id}\n"
-                f"Имя: {user_info.get('first_name', 'Неизвестно')}\n\n"
-                f"Теперь этот пользователь должен настроить свои столы.",
-                reply_markup=get_admin_management_keyboard()
-            )
+            else:
+                await message.answer("❌ Не удалось добавить официанта.")
         
     except ValueError:
         await message.answer("❌ Введите корректный ID (число).")
