@@ -1072,7 +1072,7 @@ async def process_new_admin_id(message: Message, state: FSMContext):
             else:
                 await message.answer("❌ Не удалось добавить администратора.")
         
-               elif adding_role == 'waiter':
+        elif adding_role == 'waiter':  # <--- ЭТА СТРОКА ДОЛЖНА БЫТЬ НА ОДНОМ УРОВНЕ С if
             if add_waiter_role(new_user_id):
                 user_info = db.get_user(new_user_id)
                 name = user_info.get('first_name', 'Неизвестно') if user_info else 'Неизвестно'
