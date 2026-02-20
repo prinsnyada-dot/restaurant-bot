@@ -24,6 +24,8 @@ logging.basicConfig(
 
 print("🔧 Режим отладки включен")
 
+# ====== DEPLOY: 2026-02-20 ======
+
 # ========== НАСТРОЙКИ ==========
 BOT_TOKEN = "8593813736:AAF0fftkjPXNz2aHVSFzQYGJ0cs7Xxw3PbY"  # ВСТАВЬ СВОЙ ТОКЕН
 MAIN_ADMIN_ID = 429549022  # ВСТАВЬ СВОЙ ID
@@ -1187,7 +1189,7 @@ async def process_edit_value(message: Message, state: FSMContext):
                 new_value = deposit
         except ValueError:
             valid = False
-            error_msg = "❌ Введите число или сокращение (например 5к, 10к, 20000)"
+            error_msg = "❌ Введите число или сокращение (например 5к, 10к, 20000)"А
     
     elif field == 'occasion':
         if new_value.lower() == 'нет':
